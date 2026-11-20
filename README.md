@@ -1,6 +1,6 @@
 # ssoggy status
 
-Live status page for everything I host — runs on a Cloudflare Worker, so it stays up when the VPS, Vercel or GitHub does not.
+Live status page for everything I host — runs on a Cloudflare Worker, so it stays up when the VPS or Vercel does not.
 
 **Live:** https://status.ssoggy.com
 
@@ -11,10 +11,11 @@ Live status page for everything I host — runs on a Cloudflare Worker, so it st
 | Game | Minecraft (`mc.ssoggy.com:25565`, full server-list handshake → player count + version) |
 | Vercel | TaalSwipe, MiniMusicLab, Sprig, Excel Dash preview, SSoggySouls Docs, Portfolio, Vishandel Volendam |
 | Cloudflare Pages | AI Chat, Beleggers Academie (OBA), CEV Dashboard |
-| GitHub Pages | `ssoggytacoblud.github.io` |
 | Nest VPS | Pterodactyl panel, router, OpenWebUI chat, Pterodactyl node |
 
-A cron trigger runs every 60 seconds. The last 90 results per target are stored in KV and rendered as heartbeat bars + uptime %.
+Nest targets are checked on `*.ssoggy.me` until the `*.ssoggy.com` TLS certs are issued by Nest; the `.com` hostnames are listed in each service's copy.
+
+A cron trigger runs every 2 minutes (the free KV tier allows 1,000 writes/day; every minute would be 1,440). The last 90 results per target are stored in KV and rendered as heartbeat bars + uptime %.
 
 ## Endpoints
 
@@ -23,9 +24,10 @@ A cron trigger runs every 60 seconds. The last 90 results per target are stored 
 | `GET /` | — | status page (server-rendered, refreshes every 30s) |
 | `GET /api/status` | — | JSON |
 | `GET /admin` | key | copy editor (login form, cookie session) |
-| `POST /admin/save` | session | write `about` / `note` overrides to KV |
+| `POST /admin/save` | session | write `about` / `note` / notice overrides to KV |
+| `POST /admin/test` | session | run one check of a single target |
 | `POST /admin/logout` | session | clear the cookie |
-| `POST /api/check` | session | force a check run |
+| `POST /api/check` | session | force a full check run |
 
 ## Editing the copy
 

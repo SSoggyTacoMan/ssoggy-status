@@ -33,6 +33,8 @@ const TARGETS = [
   { id: "oba", name: "Beleggers Academie", group: "Cloudflare Pages", type: "http", url: "https://oba.ssoggy.com/", about: "Cloudflare Pages · online-beleggers-academie." },
   { id: "cev", name: "CEV Dashboard", group: "Cloudflare Pages", type: "http", url: "https://cev.ssoggy.com/", about: "Cloudflare Pages · same project as OBA, different route." },
 
+  { id: "ghpages", name: "GitHub Pages", group: "GitHub Pages", type: "http", url: "https://ssoggytacoblud.github.io/", about: "Static site served by GitHub Pages." },
+
   { id: "panel", name: "Pterodactyl Panel", group: "Nest VPS", type: "http", url: "https://panel.ssoggy.me/", okUpTo: 499, about: "Nest container, behind the hackclub reverse proxy. .com: panel.ssoggy.com (waiting on Nest cert)." },
   { id: "router", name: "Router", group: "Nest VPS", type: "http", url: "https://router.ssoggy.me/", okUpTo: 499, about: "Nest container, port 20128. .com: router.ssoggy.com (waiting on Nest cert)." },
   {
@@ -43,7 +45,7 @@ const TARGETS = [
   { id: "node", name: "Pterodactyl Node", group: "Nest VPS", type: "http", url: "https://node.ssoggy.me/", okUpTo: 499, about: "Wings daemon. 401 is expected — it means it's alive. .com: node.ssoggy.com (waiting on Nest cert)." },
 ];
 
-const GROUPS = ["Game", "Vercel", "Cloudflare Pages", "Nest VPS"];
+const GROUPS = ["Game", "Vercel", "Cloudflare Pages", "GitHub Pages", "Nest VPS"];
 const HISTORY = 90;
 const HTTP_TIMEOUT = 7000;
 const MC_TIMEOUT = 6000;
@@ -306,6 +308,7 @@ function uptimeOf(entry) {
 }
 
 function avgMs(entry) {
+  if (!entry) return null;
   const beats = (entry.history || []).filter((b) => b && b.ms != null && b.ms < 30000);
   if (!beats.length) return null;
   return beats.reduce((a, b) => a + b.ms, 0) / beats.length;
@@ -320,6 +323,39 @@ const fmtAgo = (t) => {
   if (s < 3600) return Math.round(s / 60) + "m ago";
   return Math.round(s / 3600) + "h ago";
 };
+const fmtDuration = (ms) => {
+  if (ms == null) return "–";
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  return Math.floor(s / 3600) + "h " + Math.round((s % 3600) / 60) + "m";
+};
+
+// How long a target has held its current state, from the trailing run of
+// identical beats in its history.
+function stateFor(entry, state) {
+  const beats = (entry?.history || []).map(normBeat).filter((b) => typeof b.ok === "boolean");
+  if (!beats.length || state === "unknown") return null;
+  let since = null;
+  for (let i = beats.length - 1; i >= 0; i--) {
+    if ((state === "up") !== !!beats[i].ok) break;
+    if (beats[i].t) since = beats[i].t;
+  }
+  return since == null ? null : Date.now() - since;
+}
+
+function overallStats(rows) {
+  let beats = 0, upBeats = 0, lat = 0, latN = 0, up = 0;
+  for (const r of rows) {
+    const h = (r.entry?.history || []).map(normBeat).filter((b) => typeof b.ok === "boolean");
+    beats += h.length;
+    upBeats += h.filter((b) => b.ok).length;
+    if (r.state === "up") up++;
+    const a = avgMs(r.entry);
+    if (a != null && r.state === "up") { lat += a; latN++; }
+  }
+  return { uptime: beats ? upBeats / beats : null, avg: latN ? lat / latN : null, up };
+}
 
 function whyText(t, last) {
   if (!last) return "No check data yet — the next run fills this in.";
@@ -404,7 +440,15 @@ a{color:inherit}
 .banner.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 28%,var(--line));background:color-mix(in srgb,var(--ok) 5%,transparent)}
 .banner.partial{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 28%,var(--line));background:color-mix(in srgb,var(--warn) 5%,transparent)}
 .banner.major{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 28%,var(--line));background:color-mix(in srgb,var(--bad) 5%,transparent)}
+.banner.empty{color:var(--faint);border-color:color-mix(in srgb,var(--faint) 22%,var(--line))}
 .banner .n{margin-left:auto;font:10px/1 var(--mono);opacity:.8}
+
+.stats{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--line);
+  border-radius:var(--radius);margin:0 0 22px;overflow:hidden;box-shadow:var(--shadow)}
+.stat{padding:9px 12px;border-left:1px solid var(--line-2)}
+.stat:first-child{border-left:0}
+.stat .k{display:block;font:9px/1.6 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+.stat .v{font:600 15px/1.25 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 
 .group{margin:0 0 24px}
 .g-head{display:flex;align-items:center;gap:8px;margin:0 0 8px;padding:0 1px}
@@ -500,6 +544,8 @@ input:focus,textarea:focus,select:focus{outline:2px solid color-mix(in srgb,var(
   .beats{grid-area:b;height:20px}.num.ms{display:none}
   .detail{padding-left:12px}
   .grid2{grid-template-columns:1fr}
+  .stat{padding:8px 10px}
+  .stat .v{font-size:13px}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 `;
@@ -529,6 +575,7 @@ function rowHtml(t, live, entry) {
   const avg = avgMs(entry);
   const beats = (entry?.history || []).map(normBeat);
   const failed = beats.filter((b) => !b.ok).length;
+  const since = stateFor(entry, state);
 
   const link = t.url
     ? `<a href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">${esc(t.url.replace(/^https?:\/\//, "").replace(/\/$/, ""))}</a>`
@@ -547,6 +594,7 @@ function rowHtml(t, live, entry) {
         <div class="detail">
           <div class="drow"><span class="k">host</span><span class="v">${link}</span></div>
           <div class="drow"><span class="k">status</span><span class="v" data-f="p-status">${state}${last?.code ? " · HTTP " + last.code : ""}</span></div>
+          <div class="drow"><span class="k">for</span><span class="v" data-f="p-for">${since != null ? fmtDuration(since) + (state === "up" ? " up" : " down") : "–"}</span></div>
           <div class="drow"><span class="k">why</span><span class="v" data-f="p-why">${esc(whyText(t, last))}</span></div>
           ${t.about ? `<div class="drow"><span class="k">about</span><span class="v">${esc(t.about)}</span></div>` : ""}
           ${t.note ? `<div class="drow"><span class="k">note</span><span class="v">${esc(t.note)}</span></div>` : ""}
@@ -573,9 +621,11 @@ function groupBlock(group, rows) {
 }
 
 function bannerState(rows) {
-  const down = rows.filter((r) => r.state === "down").length;
+  const known = rows.filter((r) => r.state !== "unknown");
+  const down = known.filter((r) => r.state === "down").length;
+  if (!known.length) return { cls: "empty", text: "Starting up — first check in progress" };
   if (!down) return { cls: "ok", text: "All systems operational" };
-  return (down / rows.length) >= 0.5
+  return (down / known.length) >= 0.5
     ? { cls: "major", text: "Major outage" }
     : { cls: "partial", text: "Partially degraded" };
 }
@@ -601,7 +651,8 @@ function renderPage(state, live, copy, notice, nonce) {
   });
   const b = bannerState(rows);
   const total = rows.length;
-  const down = rows.filter((r) => r.state === "down").length;
+  const st = overallStats(rows);
+  const pct = (v) => (v == null ? "–" : (v * 100).toFixed(v >= 0.995 ? 1 : 2) + "%");
   const hasNotice = notice && notice.text && notice.text.trim();
 
   return `<!doctype html>
@@ -627,7 +678,13 @@ ${head("ssoggy status", nonce, "Live status for everything I host.")}
   <div class="banner ${b.cls}" id="banner">
     <i aria-hidden="true"></i>
     <span id="banner-text">${b.text}</span>
-    <span class="n" id="banner-count">${total - down}/${total}</span>
+    <span class="n" id="banner-count">${st.up}/${total}</span>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><span class="k">services</span><span class="v" id="s-up">${st.up}/${total}</span></div>
+    <div class="stat"><span class="k">uptime · ${HISTORY} checks</span><span class="v" id="s-uptime">${pct(st.uptime)}</span></div>
+    <div class="stat"><span class="k">avg latency</span><span class="v" id="s-latency">${st.avg != null ? fmtMs(st.avg) : "–"}</span></div>
   </div>
 
   <main id="main">${GROUPS.map((g) => groupBlock(g, rows)).join("")}</main>
@@ -694,25 +751,45 @@ function beats(history){
   }
   return html;
 }
+function dur(ms){
+  if (ms == null) return "–";
+  const s = Math.max(0, Math.round(ms/1000));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.round(s/60) + "m";
+  return Math.floor(s/3600) + "h " + Math.round((s%3600)/60) + "m";
+}
+function sinceFor(history, status){
+  const b = (history || []).filter(x => x && typeof x.ok === "boolean");
+  if (!b.length || status === "unknown") return null;
+  let since = null;
+  for (let i = b.length - 1; i >= 0; i--){
+    if ((status === "up") !== !!b[i].ok) break;
+    if (b[i].t) since = b[i].t;
+  }
+  return since == null ? null : Date.now() - since;
+}
 async function refresh(){
   try{
     const res = await fetch("/api/status", { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
     const byId = Object.fromEntries(data.targets.map(t => [t.id, t]));
-    let down = 0;
     document.querySelectorAll(".row").forEach((row) => {
       const t = byId[row.dataset.id];
       if (!t) return;
-      if (t.status === "down") down++;
       row.querySelector(".state").className = "state " + t.status;
       const sr = row.querySelector(".name .sr");
       if (sr) sr.textContent = " — " + t.status;
-      row.querySelector(".beats").innerHTML = beats(t.history);
+      const be = row.querySelector(".beats");
+      be.innerHTML = beats(t.history);
+      be.setAttribute("aria-label", "Last " + (t.history || []).length + " checks");
       row.querySelector(".num.up").textContent = t.uptime != null ? (t.uptime*100).toFixed(t.uptime >= 0.995 ? 1 : 2) + "%" : "–";
       row.querySelector(".num.ms").textContent = t.avgMs != null ? MS(t.avgMs) : "–";
       const ps = row.querySelector('[data-f="p-status"]');
       if (ps) ps.textContent = t.status + (t.code ? " · HTTP " + t.code : "");
+      const pf = row.querySelector('[data-f="p-for"]');
+      if (pf){ const d = sinceFor(t.history, t.status);
+        pf.textContent = d != null ? dur(d) + (t.status === "up" ? " up" : " down") : "–"; }
       const pw = row.querySelector('[data-f="p-why"]');
       if (pw) pw.textContent = why(t);
       const pl = row.querySelector('[data-f="p-last"]');
@@ -720,17 +797,31 @@ async function refresh(){
     });
     document.querySelectorAll(".group").forEach((sec) => {
       const rows = sec.querySelectorAll(".row");
+      const upRows = Array.from(rows).filter(r => r.querySelector(".state").classList.contains("up")).length;
       const bad = Array.from(rows).filter(r => r.querySelector(".state").classList.contains("down")).length;
       const cnt = sec.querySelector(".g-count");
-      if (cnt){ cnt.textContent = (rows.length - bad) + "/" + rows.length; cnt.className = "g-count" + (bad ? " bad" : ""); }
+      if (cnt){ cnt.textContent = upRows + "/" + rows.length; cnt.className = "g-count" + (bad ? " bad" : ""); }
     });
+    const known = data.targets.filter(t => t.status !== "unknown");
+    const up = data.targets.filter(t => t.status === "up").length;
+    const down = known.filter(t => t.status === "down").length;
     const total = data.targets.length;
-    const cls = down === 0 ? "ok" : down / total >= 0.5 ? "major" : "partial";
+    const cls = !known.length ? "empty" : down === 0 ? "ok" : down / known.length >= 0.5 ? "major" : "partial";
     const banner = document.getElementById("banner");
     banner.className = "banner " + cls;
     document.getElementById("banner-text").textContent =
-      cls === "ok" ? "All systems operational" : cls === "major" ? "Major outage" : "Partially degraded";
-    document.getElementById("banner-count").textContent = (total - down) + "/" + total;
+      cls === "empty" ? "Starting up — first check in progress" : cls === "ok" ? "All systems operational" : cls === "major" ? "Major outage" : "Partially degraded";
+    document.getElementById("banner-count").textContent = up + "/" + total;
+    let beatsN = 0, upN = 0, lat = 0, latN = 0;
+    data.targets.forEach(t => {
+      const h = (t.history || []).filter(x => x && typeof x.ok === "boolean");
+      beatsN += h.length; upN += h.filter(x => x.ok).length;
+      if (t.avgMs != null && t.status === "up"){ lat += t.avgMs; latN++; }
+    });
+    document.getElementById("s-up").textContent = up + "/" + total;
+    document.getElementById("s-uptime").textContent =
+      beatsN ? (upN / beatsN * 100).toFixed(upN / beatsN >= 0.995 ? 1 : 2) + "%" : "–";
+    document.getElementById("s-latency").textContent = latN ? MS(lat / latN) : "–";
     document.getElementById("updated").textContent = T(data.updated);
   }catch(e){}
 }
