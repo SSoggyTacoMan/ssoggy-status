@@ -561,7 +561,7 @@ function renderPage(state, live, copy, nonce) {
 <div class="wrap">
   <div class="top">
     <h1>ssoggy status</h1>
-    <span class="meta" id="updated">${updated ? updated.toISOString().slice(11, 19) + " UTC" : "checking"}</span>
+    <span class="meta" id="updated">${updated ? fmtTime(updated) : "checking"}</span>
   </div>
 
   <div class="banner ${b.cls}" id="banner">
