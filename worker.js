@@ -4,23 +4,20 @@ import { connect } from "cloudflare:sockets";
  * ssoggy status — Cloudflare Worker
  *
  * Copy per service: TARGETS.about / TARGETS.note are the defaults.
- * Overrides live in KV and are edited at /admin?key=…  (settings → admin key)
+ * Overrides live in KV and are edited at /admin (cookie session, ADMIN_KEY secret).
  *
- * GET  /            status page
- * GET  /api/status  JSON
- * GET  /api/check   force a check run
- * GET  /admin?key=  copy editor
+ * GET  /             status page
+ * GET  /api/status   JSON
+ * GET  /admin        editor (login once)
  */
 
 const TARGETS = [
-  // ---- Game ----
   {
     id: "minecraft", name: "Minecraft", group: "Game", type: "mc", host: "mc.ssoggy.com", port: 25565,
     sub: "mc.ssoggy.com:25565",
     about: "Velocity proxy on the Oracle box, forwarding to the Nest container.",
   },
 
-  // ---- Vercel ----
   { id: "taalswipe", name: "TaalSwipe", group: "Vercel", type: "http", url: "https://taalswipe.ssoggy.com/", about: "Vercel · production branch." },
   { id: "minimusiclab", name: "MiniMusicLab", group: "Vercel", type: "http", url: "https://minimusiclab.ssoggy.com/", about: "Vercel · static site." },
   { id: "sprig", name: "Sprig", group: "Vercel", type: "http", url: "https://sprig.ssoggy.com/", about: "Vercel · takes a couple of seconds on cold start." },
@@ -29,15 +26,12 @@ const TARGETS = [
   { id: "portfolio", name: "Portfolio", group: "Vercel", type: "http", url: "https://maarenaurich.com/", about: "Vercel · apex of maarenaurich.com." },
   { id: "vishandel", name: "Vishandel Volendam", group: "Vercel", type: "http", url: "https://vishandelvolendam.maarenaurich.com/", about: "Vercel · client site." },
 
-  // ---- Cloudflare Pages ----
   { id: "ai", name: "AI Chat", group: "Cloudflare Pages", type: "http", url: "https://ai.ssoggy.com/", about: "Cloudflare Pages · ai-chat-export." },
   { id: "oba", name: "Beleggers Academie", group: "Cloudflare Pages", type: "http", url: "https://oba.ssoggy.com/", about: "Cloudflare Pages · online-beleggers-academie." },
   { id: "cev", name: "CEV Dashboard", group: "Cloudflare Pages", type: "http", url: "https://cev.ssoggy.com/", about: "Cloudflare Pages · same project as OBA, different route." },
 
-  // ---- GitHub Pages ----
   { id: "ghpages", name: "GitHub Pages", group: "GitHub Pages", type: "http", url: "https://ssoggytacoblud.github.io/", about: "Static site served by GitHub Pages." },
 
-  // ---- Nest VPS ----
   { id: "panel", name: "Pterodactyl Panel", group: "Nest VPS", type: "http", url: "https://panel.ssoggy.me/", okUpTo: 499, about: "Nest container, behind the hackclub reverse proxy." },
   { id: "router", name: "Router", group: "Nest VPS", type: "http", url: "https://router.ssoggy.me/", okUpTo: 499, about: "Nest container, port 20128." },
   {
@@ -55,6 +49,44 @@ const MC_TIMEOUT = 6000;
 const KV_KEY = "state:v2";
 const KV_KEY_OLD = "state:v1";
 const COPY_KEY = "copy:v1";
+const MAX_BODY = 20_000;
+const COOKIE = "ssoggy_admin";
+
+/* ------------------------------- crypto ------------------------------- */
+
+async function sha256(input) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function safeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let out = 0;
+  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return out === 0;
+}
+
+function parseCookies(header) {
+  const out = {};
+  (header || "").split(";").forEach((part) => {
+    const i = part.indexOf("=");
+    if (i < 0) return;
+    out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  });
+  return out;
+}
+
+async function sessionToken(env) {
+  if (!env.ADMIN_KEY) return null;
+  return sha256("session:" + env.ADMIN_KEY);
+}
+
+async function isAuthed(request, env) {
+  const token = await sessionToken(env);
+  if (!token) return false;
+  const got = parseCookies(request.headers.get("cookie"))[COOKIE];
+  return !!got && safeEqual(got, token);
+}
 
 /* ------------------------------- copy ------------------------------- */
 
@@ -82,7 +114,7 @@ async function checkHttp(t) {
       method: "GET",
       redirect: "follow",
       signal: ac.signal,
-      headers: { "user-agent": "ssoggy-status/3.1 (+status.ssoggy.com)" },
+      headers: { "user-agent": "ssoggy-status/4.0 (+status.ssoggy.com)" },
       cf: { cacheTtl: 0, cacheEverything: false },
     });
     const ms = Date.now() - started;
@@ -310,98 +342,129 @@ function whyText(t, last) {
   return `Request failed: ${note || "unknown error"}.`;
 }
 
-/* ------------------------------- render ------------------------------- */
-
-const CHEVRON = `<svg class="chev" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>`;
+/* ------------------------------- styles ------------------------------- */
 
 const CSS = `
 :root{
-  --bg:#ffffff; --fg:#16181c; --muted:#70757d; --faint:#9aa0a8;
-  --line:#e4e6ea; --line-2:#f0f1f4;
-  --ok:#1a9d54; --bad:#d1332e; --warn:#a8710a; --empty:#e9ebee;
-  --panel:#fafbfc;
+  --bg:#fff; --fg:#14161a; --muted:#6b7078; --faint:#9ba1a9;
+  --line:#e5e7ea; --line-2:#f1f2f5;
+  --ok:#18984f; --bad:#cf312c; --warn:#a06a06; --empty:#e9ebee;
+  --panel:#fafbfc; --radius:4px;
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
 }
 @media (prefers-color-scheme: dark){
-  :root{ --bg:#0d0f12; --fg:#e7e9ec; --muted:#8b9199; --faint:#666c75;
-    --line:#232730; --line-2:#1a1e25; --ok:#35c46b; --bad:#ff6361; --warn:#d29922; --empty:#232730; --panel:#111418; }
+  :root{
+    --bg:#0c0e11; --fg:#e8eaed; --muted:#8b9199; --faint:#5f656e;
+    --line:#22262e; --line-2:#171a20;
+    --ok:#34c46a; --bad:#ff625c; --warn:#d8a13a; --empty:#22262e;
+    --panel:#101318;
+  }
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);
-  font:13.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 var(--sans);
   -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
-.wrap{max-width:820px;margin:0 auto;padding:30px 20px 44px}
-.top{display:flex;align-items:baseline;gap:10px;margin-bottom:18px}
-h1{font-size:14px;font-weight:600;margin:0;letter-spacing:-.005em}
-.meta{margin-left:auto;font-size:11px;color:var(--faint);font-family:var(--mono)}
-.banner{display:flex;align-items:center;gap:9px;font-size:12.5px;font-weight:550;
-  padding:9px 12px;margin-bottom:22px;border:1px solid var(--line);border-left-width:3px;border-radius:3px}
-.banner.ok{border-left-color:var(--ok);color:var(--ok);background:color-mix(in srgb,var(--ok) 6%,transparent)}
-.banner.partial{border-left-color:var(--warn);color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,transparent)}
-.banner.major{border-left-color:var(--bad);color:var(--bad);background:color-mix(in srgb,var(--bad) 7%,transparent)}
-.banner .n{margin-left:auto;font-weight:500;font-family:var(--mono);font-size:11px;opacity:.9}
-.group{margin:0 0 20px}
-.g-head{display:flex;align-items:baseline;gap:8px;margin:0 0 7px}
-.g-head h2{font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0}
-.g-count{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+::selection{background:color-mix(in srgb,var(--ok) 25%,transparent)}
+.wrap{max-width:800px;margin:0 auto;padding:34px 20px 48px}
+
+.top{display:flex;align-items:center;gap:10px;padding-bottom:12px;margin-bottom:20px;border-bottom:1px solid var(--line)}
+h1{font-size:13px;font-weight:600;margin:0;letter-spacing:.01em}
+.meta{margin-left:auto;font:10.5px/1 var(--mono);color:var(--faint);letter-spacing:.02em}
+
+.banner{display:flex;align-items:center;gap:9px;font-size:12px;font-weight:550;
+  padding:8px 11px;margin-bottom:24px;border:1px solid var(--line);border-left:2px solid;border-radius:var(--radius)}
+.banner i{width:5px;height:5px;border-radius:50%;background:currentColor;flex:0 0 auto}
+.banner.ok{color:var(--ok);border-left-color:var(--ok);background:color-mix(in srgb,var(--ok) 5%,transparent)}
+.banner.partial{color:var(--warn);border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 6%,transparent)}
+.banner.major{color:var(--bad);border-left-color:var(--bad);background:color-mix(in srgb,var(--bad) 6%,transparent)}
+.banner .n{margin-left:auto;font:10.5px/1 var(--mono);opacity:.85}
+
+.group{margin:0 0 22px}
+.g-head{display:flex;align-items:center;gap:8px;margin:0 0 8px;padding:0 1px}
+.g-head h2{font:600 9.5px/1 var(--mono);letter-spacing:.13em;text-transform:uppercase;color:var(--faint);margin:0}
+.g-head .rule{flex:1;height:1px;background:var(--line-2)}
+.g-count{font:500 9.5px/1 var(--mono);color:var(--faint)}
 .g-count.bad{color:var(--bad)}
-.list{border:1px solid var(--line);border-radius:3px;overflow:hidden}
+
+.list{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--bg)}
 .row{border-top:1px solid var(--line-2)}
 .row:first-child{border-top:0}
-.row>summary{display:grid;grid-template-columns:8px minmax(120px,1fr) minmax(0,2.2fr) 52px 58px 14px;
-  gap:12px;align-items:center;padding:8px 12px;cursor:pointer;list-style:none;user-select:none}
+.row>summary{display:grid;grid-template-columns:6px minmax(112px,1fr) minmax(0,2.3fr) 50px 54px 13px;
+  gap:11px;align-items:center;padding:8px 12px;cursor:pointer;list-style:none;user-select:none}
 .row>summary::-webkit-details-marker{display:none}
 .row>summary::marker{content:""}
 .row>summary:hover{background:var(--panel)}
+.row>summary:focus-visible{outline:2px solid color-mix(in srgb,var(--ok) 45%,transparent);outline-offset:-2px}
 .row[open]{background:var(--panel)}
-.state{width:6px;height:6px;border-radius:50%;background:var(--faint)}
+.row[open]>summary{background:var(--panel)}
+.state{width:5px;height:5px;border-radius:50%;background:var(--faint);justify-self:start}
 .state.up{background:var(--ok)}
 .state.down{background:var(--bad)}
-.name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.beats{display:flex;gap:2px;height:24px;align-items:stretch;min-width:0}
+.name{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.beats{display:flex;gap:1px;height:24px;align-items:stretch;min-width:0}
 .beat{flex:1 1 0;min-width:1px;border-radius:1px;background:var(--empty)}
-.beat.up{background:var(--ok);opacity:.75}
-.beat.down{background:var(--bad)}
-.beat.empty{opacity:.5}
-.num{font-family:var(--mono);font-size:11px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.beat.up{background:var(--ok);opacity:.7}
+.beat.down{background:var(--bad);opacity:.9}
+.beat.empty{opacity:.45}
+
+.num{font:10.5px/1 var(--mono);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted)}
 .num.ms{color:var(--faint)}
-.chev{color:var(--faint);transition:transform .14s ease;justify-self:end}
+.chev{color:var(--faint);transition:transform .15s ease;justify-self:end}
 .row[open] .chev{transform:rotate(90deg)}
-.detail{display:grid;gap:3px;padding:2px 12px 11px 32px;font-size:12px}
-.drow{display:grid;grid-template-columns:56px 1fr;gap:10px}
-.drow .k{font-family:var(--mono);font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);padding-top:2px}
-.drow .v{color:var(--muted);min-width:0;overflow-wrap:anywhere}
-.drow a{color:var(--fg);text-decoration:none;border-bottom:1px solid var(--line)}
+
+.detail{display:grid;gap:4px;padding:3px 12px 12px 29px;border-top:1px solid var(--line-2)}
+.drow{display:grid;grid-template-columns:52px 1fr;gap:10px;align-items:baseline}
+.drow .k{font:9.5px/1.6 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--faint)}
+.drow .v{color:var(--muted);min-width:0;overflow-wrap:anywhere;font-size:11.5px}
+.drow a{color:var(--fg);text-decoration:none;border-bottom:1px solid var(--line-2)}
 .drow a:hover{border-color:var(--fg)}
+
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;font-style:normal}
-footer{margin-top:26px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
-  font-size:11px;color:var(--faint);font-family:var(--mono)}
-footer a{color:var(--faint);text-decoration:none;border-bottom:1px solid var(--line)}
-footer a:hover{color:var(--fg)}
+
+footer{margin-top:30px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  font:10.5px/1.6 var(--mono);color:var(--faint)}
+footer a{color:var(--faint);text-decoration:none;border-bottom:1px solid var(--line-2)}
+footer a:hover{color:var(--muted)}
+
+/* admin + login */
+.login{max-width:300px;margin:12vh auto 0}
+.login .field{margin:10px 0}
+.field{display:grid;gap:5px}
+.field>label,.flabel{font:9.5px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+input[type=password],textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);
+  border-radius:var(--radius);padding:7px 9px;font:12px/1.45 var(--mono);resize:vertical}
+input[type=password]:focus,textarea:focus{outline:2px solid color-mix(in srgb,var(--ok) 35%,transparent);outline-offset:1px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:var(--fg);color:var(--bg);
+  border:0;border-radius:var(--radius);padding:8px 13px;font:600 11.5px/1 var(--sans);cursor:pointer;text-decoration:none}
+.btn.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
+.btn:focus-visible{outline:2px solid color-mix(in srgb,var(--ok) 45%,transparent);outline-offset:2px}
+.svc{border:1px solid var(--line);border-radius:var(--radius);padding:11px 12px}
+.svc+.svc{margin-top:10px}
+.svc-h{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.svc-h strong{font-size:12.5px;font-weight:600}
+.svc-h .id{font:10px/1 var(--mono);color:var(--faint)}
+.svc-h .state-tag{margin-left:auto;font:9.5px/1 var(--mono);color:var(--faint)}
+.check{display:flex;align-items:center;gap:6px;font:10.5px/1 var(--mono);color:var(--faint);margin-top:7px}
+.err{color:var(--bad)}
+.mt{margin-top:8px}
+footer.sp{margin-top:26px}
+.note-ok{color:var(--ok);font:10.5px/1 var(--mono)}
+.actions{display:flex;gap:9px;margin-top:16px;align-items:center}
+
 @media (max-width:640px){
-  .row>summary{grid-template-columns:8px 1fr 44px 14px;grid-template-areas:"state name up chev" ". beats beats beats";gap:5px 10px;padding:9px 11px}
-  .state{grid-area:state}.name{grid-area:name}.num.up{grid-area:up}.chev{grid-area:chev}
-  .beats{grid-area:beats;height:20px}.num.ms{display:none}
-  .detail{padding-left:14px}
+  .row>summary{grid-template-columns:6px 1fr 42px 13px;grid-template-areas:"s n u c" ". b b b";gap:6px 10px;padding:9px 11px}
+  .state{grid-area:s}.name{grid-area:n}.num.up{grid-area:u}.chev{grid-area:c}
+  .beats{grid-area:b;height:20px}.num.ms{display:none}
+  .detail{padding-left:12px}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
-
-/* admin */
-.admin{display:grid;gap:16px}
-.field{display:grid;gap:5px}
-.field label{font-family:var(--mono);font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint)}
-textarea,input[type=text]{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);
-  border-radius:3px;padding:7px 9px;font:12.5px/1.45 inherit;resize:vertical}
-textarea:focus,input:focus{outline:2px solid color-mix(in srgb,var(--ok) 40%,transparent);outline-offset:1px;border-color:var(--line)}
-.svc{border:1px solid var(--line);border-radius:3px;padding:12px}
-.svc-h{display:flex;align-items:baseline;gap:8px;margin-bottom:9px}
-.svc-h strong{font-size:13px;font-weight:600}
-.svc-h span{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
-.btn{display:inline-flex;align-items:center;gap:6px;background:var(--fg);color:var(--bg);border:0;
-  border-radius:3px;padding:8px 14px;font:600 12px/1 inherit;cursor:pointer}
-.btn.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
-.saved{color:var(--ok);font-size:12px;font-family:var(--mono)}
 `;
+
+const CHEVRON = `<svg class="chev" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5"/></svg>`;
+
+/* ------------------------------- render ------------------------------- */
 
 function beatBars(entry) {
   const beats = (entry?.history || []).map(normBeat).slice(-HISTORY);
@@ -421,19 +484,12 @@ function rowHtml(t, live, entry) {
   const state = last ? (last.ok ? "up" : "down") : "unknown";
   const up = uptimeOf(entry);
   const avg = avgMs(entry);
-  const bits = [];
-  if (last?.ms != null) bits.push(fmtMs(last.ms));
-  if (last?.players) bits.push(`${last.players.online}/${last.players.max} players`);
-  if (last?.version) bits.push(last.version);
-  if (last?.code) bits.push("HTTP " + last.code);
-  if (last?.note && state !== "up") bits.push(last.note);
-  const sub = bits.length ? bits.join(" · ") : (t.sub || t.url);
+  const beats = (entry?.history || []).map(normBeat);
+  const failed = beats.filter((b) => !b.ok).length;
 
   const link = t.url
     ? `<a href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">${esc(t.url.replace(/^https?:\/\//, "").replace(/\/$/, ""))}</a>`
     : `<span>${esc(t.sub || t.host)}</span>`;
-  const beats = (entry?.history || []).map(normBeat);
-  const failed = beats.filter((b) => !b.ok).length;
 
   return `
       <details class="row" data-id="${esc(t.id)}">
@@ -465,6 +521,7 @@ function groupBlock(group, rows) {
     <section class="group">
       <div class="g-head">
         <h2>${esc(group)}</h2>
+        <span class="rule"></span>
         <span class="g-count ${down ? "bad" : ""}">${items.length - down}/${items.length}</span>
       </div>
       <div class="list">${items.map((r) => rowHtml(r.t, r.live, r.entry)).join("")}</div>
@@ -479,7 +536,7 @@ function bannerState(rows) {
     : { cls: "partial", text: "Partially degraded" };
 }
 
-function renderPage(state, live, copy) {
+function renderPage(state, live, copy, nonce) {
   const targets = TARGETS.map((t) => effective(t, copy));
   const rows = targets.map((t) => {
     const entry = state[t.id] || null;
@@ -498,16 +555,17 @@ function renderPage(state, live, copy) {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ssoggy status</title>
 <meta name="color-scheme" content="light dark">
-<style>${CSS}</style>
+<style nonce="${nonce}">${CSS}</style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
     <h1>ssoggy status</h1>
-    <span class="meta"><span id="updated">${updated ? "Updated " + fmtAgo(updated) : "checking…"}</span></span>
+    <span class="meta" id="updated">${updated ? updated.toISOString().slice(11, 19) + " UTC" : "checking"}</span>
   </div>
 
   <div class="banner ${b.cls}" id="banner">
+    <i aria-hidden="true"></i>
     <span id="banner-text">${b.text}</span>
     <span class="n" id="banner-count">${total - down}/${total}</span>
   </div>
@@ -515,11 +573,11 @@ function renderPage(state, live, copy) {
   <main id="main">${GROUPS.map((g) => groupBlock(g, rows)).join("")}</main>
 
   <footer>
-    <span>90 samples · 60s interval · click a row</span>
+    <span>90 samples · 60s · click a row</span>
     <span><a href="/api/status">json</a></span>
   </footer>
 </div>
-<script>
+<script nonce="${nonce}">
 const MS = (ms) => ms == null ? "–" : ms < 1000 ? Math.round(ms) + " ms" : (ms / 1000).toFixed(2) + " s";
 const T = (t) => t ? new Date(t).toISOString().slice(11, 19) + " UTC" : "–";
 function ago(t){ if(!t) return "never"; const s = Math.max(0, Math.round((Date.now()-t)/1000));
@@ -598,7 +656,7 @@ async function refresh(){
     document.getElementById("banner-text").textContent =
       cls === "ok" ? "All systems operational" : cls === "major" ? "Major outage" : "Partially degraded";
     document.getElementById("banner-count").textContent = (total - down) + "/" + total;
-    document.getElementById("updated").textContent = "Updated " + ago(data.updated);
+    document.getElementById("updated").textContent = T(data.updated);
   }catch(e){}
 }
 setInterval(refresh, 30000);
@@ -607,32 +665,61 @@ setInterval(refresh, 30000);
 </html>`;
 }
 
-function renderAdmin(copy, key, saved) {
+function renderLogin(nonce, error) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>ssoggy status · sign in</title>
+<meta name="color-scheme" content="light dark">
+<style nonce="${nonce}">${CSS}</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="login">
+    <div class="top"><h1>ssoggy status</h1><span class="meta">admin</span></div>
+    <form method="post" action="/admin">
+      <div class="field">
+        <label for="key">admin key</label>
+        <input id="key" name="key" type="password" autocomplete="current-password" autofocus>
+      </div>
+      ${error ? '<div class="check err">wrong key</div>' : ""}
+      <div class="actions"><button class="btn" type="submit">sign in</button></div>
+    </form>
+    <footer class="sp"><span>&nbsp;</span><span><a href="/">status</a></span></footer>
+  </div>
+</div>
+</body>
+</html>`;
+}
+
+function renderAdmin(copy, nonce, saved) {
   const groups = GROUPS.map((g) => {
     const items = TARGETS.filter((t) => t.group === g);
     return `
       <section class="group">
-        <div class="g-head"><h2>${esc(g)}</h2></div>
-        <div class="admin">
-          ${items.map((t) => {
-            const o = copy[t.id] || {};
-            return `
-            <div class="svc">
-              <div class="svc-h"><strong>${esc(t.name)}</strong><span>${esc(t.id)}</span></div>
-              <div class="field">
-                <label for="about-${esc(t.id)}">about · ${o.about != null ? "overridden" : "default"}</label>
-                <textarea id="about-${esc(t.id)}" name="about_${esc(t.id)}" rows="2" placeholder="${esc(t.about || "no default")}">${esc(o.about ?? "")}</textarea>
-              </div>
-              <div class="field" style="margin-top:8px">
-                <label for="note-${esc(t.id)}">note · ${o.note != null ? "overridden" : "default"}</label>
-                <textarea id="note-${esc(t.id)}" name="note_${esc(t.id)}" rows="2" placeholder="${esc(t.note || "no default")}">${esc(o.note ?? "")}</textarea>
-              </div>
-              <div class="field" style="margin-top:8px">
-                <label><input type="checkbox" name="reset_${esc(t.id)}" value="1"> reset to default</label>
-              </div>
-            </div>`;
-          }).join("")}
-        </div>
+        <div class="g-head"><h2>${esc(g)}</h2><span class="rule"></span></div>
+        ${items.map((t) => {
+          const o = copy[t.id] || {};
+          return `
+          <div class="svc">
+            <div class="svc-h">
+              <strong>${esc(t.name)}</strong><span class="id">${esc(t.id)}</span>
+              <span class="state-tag">${o.about != null || o.note != null ? "overridden" : "default"}</span>
+            </div>
+            <div class="field">
+              <label for="about-${esc(t.id)}">about</label>
+              <textarea id="about-${esc(t.id)}" name="about_${esc(t.id)}" rows="2" placeholder="${esc(t.about || "")}">${esc(o.about ?? "")}</textarea>
+            </div>
+            <div class="field mt">
+              <label for="note-${esc(t.id)}">note</label>
+              <textarea id="note-${esc(t.id)}" name="note_${esc(t.id)}" rows="2" placeholder="${esc(t.note || "")}">${esc(o.note ?? "")}</textarea>
+            </div>
+            <label class="check"><input type="checkbox" name="reset_${esc(t.id)}" value="1"> reset to default</label>
+          </div>`;
+        }).join("")}
       </section>`;
   }).join("");
 
@@ -642,25 +729,27 @@ function renderAdmin(copy, key, saved) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<title>ssoggy status · copy editor</title>
+<title>ssoggy status · copy</title>
 <meta name="color-scheme" content="light dark">
-<style>${CSS}</style>
+<style nonce="${nonce}">${CSS}</style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
     <h1>copy editor</h1>
-    <span class="meta">${saved ? '<span class="saved">saved</span>' : "blank = use default"}</span>
+    <span class="meta">${saved ? '<span class="note-ok">saved</span>' : "blank = default"}</span>
   </div>
-  ${saved ? "" : ""}
-  <form method="post" action="/admin?key=${encodeURIComponent(key)}">
+  <form method="post" action="/admin/save">
     ${groups}
-    <div style="display:flex;gap:10px;margin-top:6px">
-      <button class="btn" type="submit">save changes</button>
-      <a class="btn ghost" href="/">back to status</a>
+    <div class="actions">
+      <button class="btn" type="submit">save</button>
+      <a class="btn ghost" href="/">status page</a>
     </div>
   </form>
-  <footer><span>overrides live in KV · key required</span><span><a href="/">status</a></span></footer>
+  <form method="post" action="/admin/logout" class="mt">
+    <button class="btn ghost" type="submit">sign out</button>
+  </form>
+  <footer><span>overrides · kv</span><span><a href="/">status</a></span></footer>
 </div>
 </body>
 </html>`;
@@ -690,11 +779,39 @@ function jsonPayload(state, live, copy) {
 
 /* ------------------------------- worker ------------------------------- */
 
-function safeEqual(a, b) {
-  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
-  let out = 0;
-  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return out === 0;
+function nonce() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return btoa(String.fromCharCode(...b)).replace(/[^a-zA-Z0-9]/g, "").slice(0, 20);
+}
+
+function headers(n, maxAge) {
+  return {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": maxAge ? `public, max-age=${maxAge}` : "no-store",
+    "content-security-policy":
+      `default-src 'none'; style-src 'nonce-${n}'; script-src 'nonce-${n}'; img-src data:; ` +
+      `connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+    "permissions-policy": "geolocation=(), microphone=(), camera=()",
+    "x-robots-tag": "noindex",
+  };
+}
+
+function html(body, n, maxAge) {
+  return new Response(body, { headers: headers(n, maxAge) });
+}
+
+function notFound() {
+  return new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
+}
+
+function sameOrigin(request, url) {
+  const origin = request.headers.get("origin");
+  if (!origin) return true; // curl / same-origin form posts without Origin are allowed
+  try { return new URL(origin).host === url.host; } catch { return false; }
 }
 
 export default {
@@ -705,15 +822,51 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
+    const method = request.method;
 
     /* ---- admin ---- */
-    if (path === "/admin") {
-      const key = url.searchParams.get("key") || "";
-      const secret = env.ADMIN_KEY;
-      if (!secret || !key || !safeEqual(key, secret)) return new Response("Not found", { status: 404 });
+    if (path.startsWith("/admin")) {
+      const authed = await isAuthed(request, env);
 
-      if (request.method === "POST") {
+      if (path === "/admin" && method === "POST") {
+        if (!env.ADMIN_KEY) return notFound();
+        const len = Number(request.headers.get("content-length") || "0");
+        if (len > MAX_BODY) return new Response("Too large", { status: 413 });
         const body = await request.text();
+        if (body.length > MAX_BODY) return new Response("Too large", { status: 413 });
+        const key = (new URLSearchParams(body).get("key") || "").trim();
+        const [a, b] = await Promise.all([sha256(key), sha256(env.ADMIN_KEY)]);
+        if (!safeEqual(a, b)) {
+          const n1 = nonce();
+          return html(renderLogin(n1, true), n1, 0);
+        }
+        const token = await sessionToken(env);
+        const n = nonce();
+        return new Response(renderAdmin(await readCopy(env), n, false), {
+          status: 303,
+          headers: {
+            ...headers(n, 0),
+            location: "/admin",
+            "set-cookie": `${COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=604800`,
+          },
+        });
+      }
+
+      if (path === "/admin/logout" && method === "POST") {
+        return new Response(null, {
+          status: 303,
+          headers: { location: "/", "set-cookie": `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0` },
+        });
+      }
+
+      if (path === "/admin/save" && method === "POST") {
+        if (!authed) return notFound();
+        if (!sameOrigin(request, url)) return new Response("Bad origin", { status: 403 });
+        const len = Number(request.headers.get("content-length") || "0");
+        if (len > MAX_BODY) return new Response("Too large", { status: 413 });
+        const body = await request.text();
+        if (body.length > MAX_BODY) return new Response("Too large", { status: 413 });
+
         const form = new URLSearchParams(body);
         const copy = await readCopy(env);
         for (const t of TARGETS) {
@@ -727,20 +880,25 @@ export default {
           else delete copy[t.id];
         }
         if (env.STATUS) await env.STATUS.put(COPY_KEY, JSON.stringify(copy));
-        return Response.redirect(new URL("/admin?key=" + encodeURIComponent(key) + "&saved=1", url).toString(), 303);
+        return new Response(null, { status: 303, headers: { location: "/admin?saved=1" } });
       }
 
-      const copy = await readCopy(env);
-      return html(renderAdmin(copy, key, url.searchParams.get("saved") === "1"), 0);
+      if (path === "/admin" && method === "GET") {
+        if (!authed) { const n2 = nonce(); return html(renderLogin(n2, false), n2, 0); }
+        const n3 = nonce();
+        return html(renderAdmin(await readCopy(env), n3, url.searchParams.get("saved") === "1"), n3, 0);
+      }
+
+      return notFound();
     }
 
     /* ---- api ---- */
-    if (path === "/api/status" || path === "/api/check") {
+    if (path === "/api/status") {
+      if (method !== "GET" && method !== "HEAD") return new Response("Method not allowed", { status: 405 });
       const state = await readState(env);
       const copy = await readCopy(env);
-      const stale = path === "/api/check" || !state.updated || Date.now() - state.updated > 90_000;
       let live = null, fresh = state;
-      if (stale) {
+      if (!state.updated || Date.now() - state.updated > 90_000) {
         const run = await runAll(env);
         live = run.byId;
         fresh = await readState(env);
@@ -748,10 +906,16 @@ export default {
       return json(jsonPayload(fresh, live, copy));
     }
 
-    /* ---- page ---- */
-    if (path !== "/" && path !== "/index.html") {
-      return new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
+    if (path === "/api/check") {
+      if (!(await isAuthed(request, env))) return notFound();
+      if (method !== "POST") return new Response("Method not allowed", { status: 405 });
+      const run = await runAll(env);
+      return json({ checked: run.results.length, at: Date.now() });
     }
+
+    /* ---- page ---- */
+    if (path !== "/" && path !== "/index.html") return notFound();
+    if (method !== "GET" && method !== "HEAD") return new Response("Method not allowed", { status: 405 });
 
     let state = await readState(env);
     let live = null;
@@ -761,22 +925,10 @@ export default {
       state = await readState(env);
     }
     const copy = await readCopy(env);
-    return html(renderPage(state, live, copy), 20);
+    const n = nonce();
+    return html(renderPage(state, live, copy, n), n, 20);
   },
 };
-
-function html(body, maxAge) {
-  return new Response(body, {
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": maxAge ? `public, max-age=${maxAge}` : "no-store",
-      "x-frame-options": "DENY",
-      "referrer-policy": "no-referrer",
-      "x-content-type-options": "nosniff",
-      "x-robots-tag": "noindex",
-    },
-  });
-}
 
 function json(obj) {
   return new Response(JSON.stringify(obj, null, 2), {
@@ -784,6 +936,7 @@ function json(obj) {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
       "access-control-allow-origin": "*",
+      "x-content-type-options": "nosniff",
     },
   });
 }
