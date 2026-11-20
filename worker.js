@@ -33,8 +33,6 @@ const TARGETS = [
   { id: "oba", name: "Beleggers Academie", group: "Cloudflare Pages", type: "http", url: "https://oba.ssoggy.com/", about: "Cloudflare Pages · online-beleggers-academie." },
   { id: "cev", name: "CEV Dashboard", group: "Cloudflare Pages", type: "http", url: "https://cev.ssoggy.com/", about: "Cloudflare Pages · same project as OBA, different route." },
 
-  { id: "ghpages", name: "GitHub Pages", group: "GitHub Pages", type: "http", url: "https://ssoggytacoblud.github.io/", about: "Static site served by GitHub Pages." },
-
   { id: "panel", name: "Pterodactyl Panel", group: "Nest VPS", type: "http", url: "https://panel.ssoggy.me/", okUpTo: 499, about: "Nest container, behind the hackclub reverse proxy. .com: panel.ssoggy.com (waiting on Nest cert)." },
   { id: "router", name: "Router", group: "Nest VPS", type: "http", url: "https://router.ssoggy.me/", okUpTo: 499, about: "Nest container, port 20128. .com: router.ssoggy.com (waiting on Nest cert)." },
   {
@@ -45,7 +43,7 @@ const TARGETS = [
   { id: "node", name: "Pterodactyl Node", group: "Nest VPS", type: "http", url: "https://node.ssoggy.me/", okUpTo: 499, about: "Wings daemon. 401 is expected — it means it's alive. .com: node.ssoggy.com (waiting on Nest cert)." },
 ];
 
-const GROUPS = ["Game", "Vercel", "Cloudflare Pages", "GitHub Pages", "Nest VPS"];
+const GROUPS = ["Game", "Vercel", "Cloudflare Pages", "Nest VPS"];
 const HISTORY = 90;
 const HTTP_TIMEOUT = 7000;
 const MC_TIMEOUT = 6000;
