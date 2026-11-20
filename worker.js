@@ -3,24 +3,27 @@ import { connect } from "cloudflare:sockets";
 /**
  * ssoggy status — Cloudflare Worker
  *
- * Copy per service: TARGETS.about / TARGETS.note are the defaults.
- * Overrides live in KV and are edited at /admin (cookie session, ADMIN_KEY secret).
+ * Public:  GET /            status page
+ *          GET /api/status  JSON
+ * Admin:   GET  /admin     login / copy editor
+ *          POST /admin     login
+ *          POST /admin/save
+ *          POST /admin/test
+ *          POST /admin/logout
  *
- * GET  /             status page
- * GET  /api/status   JSON
- * GET  /admin        editor (login once)
+ * Cron: every 2 minutes (free KV tier allows 1,000 writes/day; 1/min would be 1,440).
  */
 
 const TARGETS = [
   {
     id: "minecraft", name: "Minecraft", group: "Game", type: "mc", host: "mc.ssoggy.com", port: 25565,
     sub: "mc.ssoggy.com:25565",
-    about: "Velocity proxy on the Oracle box, forwarding to the Nest container.",
+    about: "Velocity proxy on the Oracle box, forwarding to the Nest container. mc.ssoggy.com takes the same A → haproxy path as .me, verified by TXT (no CNAME).",
   },
 
   { id: "taalswipe", name: "TaalSwipe", group: "Vercel", type: "http", url: "https://taalswipe.ssoggy.com/", about: "Vercel · production branch." },
   { id: "minimusiclab", name: "MiniMusicLab", group: "Vercel", type: "http", url: "https://minimusiclab.ssoggy.com/", about: "Vercel · static site." },
-  { id: "sprig", name: "Sprig", group: "Vercel", type: "http", url: "https://sprig.ssoggy.com/", about: "Vercel · takes a couple of seconds on cold start." },
+  { id: "sprig", name: "Sprig", group: "Vercel", type: "http", url: "https://sprig.ssoggy.com/", about: "Vercel · slow on cold start." },
   { id: "excel-dash", name: "Excel Dash (preview)", group: "Vercel", type: "http", url: "https://excel-dash-preview.ssoggy.com/", about: "Vercel · preview build." },
   { id: "ssoggysouls", name: "SSoggySouls Docs", group: "Vercel", type: "http", url: "https://ssoggysouls.ssoggy.com/", about: "Jekyll docs, built by Vercel from the mod repo." },
   { id: "portfolio", name: "Portfolio", group: "Vercel", type: "http", url: "https://maarenaurich.com/", about: "Vercel · apex of maarenaurich.com." },
@@ -30,27 +33,28 @@ const TARGETS = [
   { id: "oba", name: "Beleggers Academie", group: "Cloudflare Pages", type: "http", url: "https://oba.ssoggy.com/", about: "Cloudflare Pages · online-beleggers-academie." },
   { id: "cev", name: "CEV Dashboard", group: "Cloudflare Pages", type: "http", url: "https://cev.ssoggy.com/", about: "Cloudflare Pages · same project as OBA, different route." },
 
-  { id: "ghpages", name: "GitHub Pages", group: "GitHub Pages", type: "http", url: "https://ssoggytacoblud.github.io/", about: "Static site served by GitHub Pages." },
-
-  { id: "panel", name: "Pterodactyl Panel", group: "Nest VPS", type: "http", url: "https://panel.ssoggy.me/", okUpTo: 499, about: "Nest container, behind the hackclub reverse proxy." },
-  { id: "router", name: "Router", group: "Nest VPS", type: "http", url: "https://router.ssoggy.me/", okUpTo: 499, about: "Nest container, port 20128." },
+  { id: "panel", name: "Pterodactyl Panel", group: "Nest VPS", type: "http", url: "https://panel.ssoggy.me/", okUpTo: 499, about: "Nest container, behind the hackclub reverse proxy. .com: panel.ssoggy.com (waiting on Nest cert)." },
+  { id: "router", name: "Router", group: "Nest VPS", type: "http", url: "https://router.ssoggy.me/", okUpTo: 499, about: "Nest container, port 20128. .com: router.ssoggy.com (waiting on Nest cert)." },
   {
     id: "chat", name: "OpenWebUI (chat)", group: "Nest VPS", type: "http", url: "https://chat.ssoggy.me/", okUpTo: 499,
-    about: "OpenWebUI on the Nest container, port 3000.",
+    about: "OpenWebUI on the Nest container, port 3000. .com: chat.ssoggy.com (waiting on Nest cert).",
     note: "Returns 502 whenever the container restarts — the proxy is fine, the app isn't up yet.",
   },
-  { id: "node", name: "Pterodactyl Node", group: "Nest VPS", type: "http", url: "https://node.ssoggy.me/", okUpTo: 499, about: "Wings daemon. 401 is expected — it means it's alive." },
+  { id: "node", name: "Pterodactyl Node", group: "Nest VPS", type: "http", url: "https://node.ssoggy.me/", okUpTo: 499, about: "Wings daemon. 401 is expected — it means it's alive. .com: node.ssoggy.com (waiting on Nest cert)." },
 ];
 
-const GROUPS = ["Game", "Vercel", "Cloudflare Pages", "GitHub Pages", "Nest VPS"];
+const GROUPS = ["Game", "Vercel", "Cloudflare Pages", "Nest VPS"];
 const HISTORY = 90;
 const HTTP_TIMEOUT = 7000;
 const MC_TIMEOUT = 6000;
-const KV_KEY = "state:v2";
-const KV_KEY_OLD = "state:v1";
+const KV_KEY = "state:v3";
+const KV_KEY_OLD = "state:v2";
 const COPY_KEY = "copy:v1";
+const NOTICE_KEY = "notice:v1";
 const MAX_BODY = 20_000;
-const COOKIE = "ssoggy_admin";
+const COOKIE = "__Host-ssoggy_admin";
+const LOGIN_MAX = 10;
+const LOGIN_WINDOW = 900;
 
 /* ------------------------------- crypto ------------------------------- */
 
@@ -88,15 +92,18 @@ async function isAuthed(request, env) {
   return !!got && safeEqual(got, token);
 }
 
-/* ------------------------------- copy ------------------------------- */
+/* ------------------------------- store ------------------------------- */
 
-async function readCopy(env) {
-  if (!env.STATUS) return {};
+async function readJson(env, key, fallback) {
+  if (!env.STATUS) return fallback;
   try {
-    const c = await env.STATUS.get(COPY_KEY, "json");
-    return c && typeof c === "object" ? c : {};
-  } catch { return {}; }
+    const v = await env.STATUS.get(key, "json");
+    return v && typeof v === "object" ? v : fallback;
+  } catch { return fallback; }
 }
+
+const readCopy = (env) => readJson(env, COPY_KEY, {});
+const readNotice = (env) => readJson(env, NOTICE_KEY, { level: "info", text: "" });
 
 function effective(t, copy) {
   const o = (copy && copy[t.id]) || {};
@@ -114,7 +121,7 @@ async function checkHttp(t) {
       method: "GET",
       redirect: "follow",
       signal: ac.signal,
-      headers: { "user-agent": "ssoggy-status/4.0 (+status.ssoggy.com)" },
+      headers: { "user-agent": "ssoggy-status/5.0 (+status.ssoggy.com)" },
       cf: { cacheTtl: 0, cacheEverything: false },
     });
     const ms = Date.now() - started;
@@ -137,7 +144,7 @@ function shortErr(e) {
   return m.slice(0, 60);
 }
 
-/* ---- Minecraft: minimal server-list handshake ---- */
+/* ---- Minecraft handshake ---- */
 
 function varint(n) {
   const out = [];
@@ -240,29 +247,32 @@ function motdText(d) {
   return d.text ? strip(d.text) : null;
 }
 
-async function runAll(env) {
-  const results = await Promise.all(TARGETS.map(async (t) => {
-    const r = t.type === "mc" ? await checkMinecraft(t) : await checkHttp(t);
-    return {
-      id: t.id, t: Date.now(), ok: !!r.ok, ms: r.ms ?? null, code: r.code ?? null,
-      note: r.note ?? null, players: r.players ?? null, version: r.version ?? null, motd: r.motd ?? null,
-    };
-  }));
+async function runOne(t) {
+  const r = t.type === "mc" ? await checkMinecraft(t) : await checkHttp(t);
+  return {
+    id: t.id, t: Date.now(), ok: !!r.ok, ms: r.ms ?? null, code: r.code ?? null,
+    note: r.note ?? null, players: r.players ?? null, version: r.version ?? null, motd: r.motd ?? null,
+  };
+}
 
+function record(state, r) {
+  const prev = state[r.id] || { history: [], total: 0, up: 0 };
+  const history = (prev.history || []).map(normBeat);
+  history.push({ t: r.t, ok: r.ok, ms: r.ms });
+  while (history.length > HISTORY) history.shift();
+  state[r.id] = { history, total: (prev.total || 0) + 1, up: (prev.up || 0) + (r.ok ? 1 : 0), last: r };
+  return state;
+}
+
+async function runAll(env) {
+  const results = await Promise.all(TARGETS.map(runOne));
   const state = await readState(env);
-  const byId = Object.fromEntries(results.map((r) => [r.id, r]));
-  for (const r of results) {
-    const prev = state[r.id] || { history: [], total: 0, up: 0 };
-    const history = (prev.history || []).map(normBeat);
-    history.push({ t: r.t, ok: r.ok, ms: r.ms });
-    while (history.length > HISTORY) history.shift();
-    state[r.id] = { history, total: (prev.total || 0) + 1, up: (prev.up || 0) + (r.ok ? 1 : 0), last: r };
-  }
+  for (const r of results) record(state, r);
   state.updated = Date.now();
   if (env.STATUS) {
     try { await env.STATUS.put(KV_KEY, JSON.stringify(state)); } catch {}
   }
-  return { results, byId };
+  return { results, byId: Object.fromEntries(results.map((r) => [r.id, r])) };
 }
 
 function normBeat(b) {
@@ -271,21 +281,16 @@ function normBeat(b) {
 }
 
 async function readState(env) {
-  if (!env.STATUS) return {};
-  try {
-    const cur = await env.STATUS.get(KV_KEY, "json");
-    if (cur && typeof cur === "object") return cur;
-    const old = await env.STATUS.get(KV_KEY_OLD, "json");
-    if (old && typeof old === "object") {
-      const migrated = { updated: old.updated };
-      for (const [k, v] of Object.entries(old)) {
-        if (k === "updated") continue;
-        migrated[k] = { history: (v.history || []).map(normBeat), total: v.total || 0, up: v.up || 0, last: v.last || null };
-      }
-      return migrated;
-    }
-    return {};
-  } catch { return {}; }
+  const cur = await readJson(env, KV_KEY, null);
+  if (cur) return cur;
+  const old = await readJson(env, KV_KEY_OLD, null);
+  if (!old) return {};
+  const migrated = { updated: old.updated };
+  for (const [k, v] of Object.entries(old)) {
+    if (k === "updated") continue;
+    migrated[k] = { history: (v.history || []).map(normBeat), total: v.total || 0, up: v.up || 0, last: v.last || null };
+  }
+  return migrated;
 }
 
 /* ------------------------------- helpers ------------------------------- */
@@ -346,123 +351,161 @@ function whyText(t, last) {
 
 const CSS = `
 :root{
-  --bg:#fff; --fg:#14161a; --muted:#6b7078; --faint:#9ba1a9;
-  --line:#e5e7ea; --line-2:#f1f2f5;
-  --ok:#18984f; --bad:#cf312c; --warn:#a06a06; --empty:#e9ebee;
-  --panel:#fafbfc; --radius:4px;
+  --bg:#fff; --fg:#14161a; --muted:#6a6f77; --faint:#9aa0a8;
+  --line:#e6e8eb; --line-2:#f2f3f5;
+  --ok:#189a50; --bad:#ce312c; --warn:#a06a06; --empty:#e9ebee;
+  --panel:#fbfbfc; --field:#fff; --radius:5px;
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  --shadow:0 1px 2px rgba(16,18,22,.04);
+}
+:root[data-theme="dark"]{
+  --bg:#0b0d10; --fg:#e9ebee; --muted:#8b9199; --faint:#5e646d;
+  --line:#20242b; --line-2:#161a20;
+  --ok:#33c46a; --bad:#ff635d; --warn:#d8a13a; --empty:#20242b;
+  --panel:#0f1216; --field:#0f1216; --shadow:none;
 }
 @media (prefers-color-scheme: dark){
-  :root{
-    --bg:#0c0e11; --fg:#e8eaed; --muted:#8b9199; --faint:#5f656e;
-    --line:#22262e; --line-2:#171a20;
-    --ok:#34c46a; --bad:#ff625c; --warn:#d8a13a; --empty:#22262e;
-    --panel:#101318;
+  :root:not([data-theme="light"]){
+    --bg:#0b0d10; --fg:#e9ebee; --muted:#8b9199; --faint:#5e646d;
+    --line:#20242b; --line-2:#161a20;
+    --ok:#33c46a; --bad:#ff635d; --warn:#d8a13a; --empty:#20242b;
+    --panel:#0f1216; --field:#0f1216; --shadow:none;
   }
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 var(--sans);
   -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
-::selection{background:color-mix(in srgb,var(--ok) 25%,transparent)}
-.wrap{max-width:800px;margin:0 auto;padding:34px 20px 48px}
+::selection{background:color-mix(in srgb,var(--ok) 22%,transparent)}
+a{color:inherit}
+.wrap{max-width:780px;margin:0 auto;padding:36px 20px 52px}
 
-.top{display:flex;align-items:center;gap:10px;padding-bottom:12px;margin-bottom:20px;border-bottom:1px solid var(--line)}
-h1{font-size:13px;font-weight:600;margin:0;letter-spacing:.01em}
-.meta{margin-left:auto;font:10.5px/1 var(--mono);color:var(--faint);letter-spacing:.02em}
+.top{display:flex;align-items:flex-start;gap:12px;margin-bottom:22px}
+.brand h1{font-size:13.5px;font-weight:600;margin:0;letter-spacing:.005em}
+.brand p{margin:2px 0 0;font-size:11.5px;color:var(--muted)}
+.top-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.meta{font:10px/1 var(--mono);color:var(--faint);letter-spacing:.03em}
+.iconbtn{appearance:none;background:none;border:1px solid var(--line);border-radius:var(--radius);
+  width:26px;height:26px;display:grid;place-items:center;color:var(--muted);cursor:pointer;padding:0}
+.iconbtn:hover{color:var(--fg);border-color:var(--faint)}
+.iconbtn:focus-visible{outline:2px solid color-mix(in srgb,var(--ok) 45%,transparent);outline-offset:2px}
 
-.banner{display:flex;align-items:center;gap:9px;font-size:12px;font-weight:550;
-  padding:8px 11px;margin-bottom:24px;border:1px solid var(--line);border-left:2px solid;border-radius:var(--radius)}
-.banner i{width:5px;height:5px;border-radius:50%;background:currentColor;flex:0 0 auto}
-.banner.ok{color:var(--ok);border-left-color:var(--ok);background:color-mix(in srgb,var(--ok) 5%,transparent)}
-.banner.partial{color:var(--warn);border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 6%,transparent)}
-.banner.major{color:var(--bad);border-left-color:var(--bad);background:color-mix(in srgb,var(--bad) 6%,transparent)}
-.banner .n{margin-left:auto;font:10.5px/1 var(--mono);opacity:.85}
+.notice{display:flex;gap:9px;align-items:flex-start;font-size:12px;padding:9px 11px;margin-bottom:14px;
+  border:1px solid var(--line);border-left-width:2px;border-radius:var(--radius);color:var(--muted)}
+.notice.info{border-left-color:var(--muted)}
+.notice.warn{border-left-color:var(--warn);color:var(--warn);background:color-mix(in srgb,var(--warn) 5%,transparent)}
+.notice.down{border-left-color:var(--bad);color:var(--bad);background:color-mix(in srgb,var(--bad) 5%,transparent)}
+.notice b{font-weight:600}
 
-.group{margin:0 0 22px}
+.banner{display:flex;align-items:center;gap:9px;font-size:12px;font-weight:550;padding:8px 11px;
+  margin-bottom:24px;border:1px solid var(--line);border-radius:var(--radius)}
+.banner i{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
+.banner.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 28%,var(--line));background:color-mix(in srgb,var(--ok) 5%,transparent)}
+.banner.partial{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 28%,var(--line));background:color-mix(in srgb,var(--warn) 5%,transparent)}
+.banner.major{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 28%,var(--line));background:color-mix(in srgb,var(--bad) 5%,transparent)}
+.banner .n{margin-left:auto;font:10px/1 var(--mono);opacity:.8}
+
+.group{margin:0 0 24px}
 .g-head{display:flex;align-items:center;gap:8px;margin:0 0 8px;padding:0 1px}
-.g-head h2{font:600 9.5px/1 var(--mono);letter-spacing:.13em;text-transform:uppercase;color:var(--faint);margin:0}
+.g-head h2{font:600 9.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:0}
 .g-head .rule{flex:1;height:1px;background:var(--line-2)}
 .g-count{font:500 9.5px/1 var(--mono);color:var(--faint)}
 .g-count.bad{color:var(--bad)}
 
-.list{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--bg)}
+.list{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow)}
 .row{border-top:1px solid var(--line-2)}
 .row:first-child{border-top:0}
-.row>summary{display:grid;grid-template-columns:6px minmax(112px,1fr) minmax(0,2.3fr) 50px 54px 13px;
+.row>summary{display:grid;grid-template-columns:6px minmax(108px,1fr) minmax(0,2.4fr) 46px 50px 12px;
   gap:11px;align-items:center;padding:8px 12px;cursor:pointer;list-style:none;user-select:none}
 .row>summary::-webkit-details-marker{display:none}
 .row>summary::marker{content:""}
 .row>summary:hover{background:var(--panel)}
-.row>summary:focus-visible{outline:2px solid color-mix(in srgb,var(--ok) 45%,transparent);outline-offset:-2px}
+.row>summary:focus-visible{outline:2px solid color-mix(in srgb,var(--ok) 40%,transparent);outline-offset:-2px}
 .row[open]{background:var(--panel)}
-.row[open]>summary{background:var(--panel)}
 .state{width:5px;height:5px;border-radius:50%;background:var(--faint);justify-self:start}
 .state.up{background:var(--ok)}
 .state.down{background:var(--bad)}
 .name{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-.beats{display:flex;gap:1px;height:24px;align-items:stretch;min-width:0}
-.beat{flex:1 1 0;min-width:1px;border-radius:1px;background:var(--empty)}
-.beat.up{background:var(--ok);opacity:.7}
-.beat.down{background:var(--bad);opacity:.9}
-.beat.empty{opacity:.45}
+.beats{display:flex;gap:2px;height:24px;align-items:stretch;min-width:0}
+.beat{flex:1 1 0;min-width:2px;border-radius:1.5px;background:var(--empty)}
+.beat.up{background:var(--ok);opacity:.62}
+.beat.down{background:var(--bad);opacity:.95}
+.beat.empty{opacity:.4}
 
-.num{font:10.5px/1 var(--mono);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted)}
+.num{font:10px/1 var(--mono);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted)}
 .num.ms{color:var(--faint)}
-.chev{color:var(--faint);transition:transform .15s ease;justify-self:end}
+.chev{color:var(--faint);transition:transform .16s ease;justify-self:end}
 .row[open] .chev{transform:rotate(90deg)}
 
-.detail{display:grid;gap:4px;padding:3px 12px 12px 29px;border-top:1px solid var(--line-2)}
-.drow{display:grid;grid-template-columns:52px 1fr;gap:10px;align-items:baseline}
-.drow .k{font:9.5px/1.6 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--faint)}
+.detail{display:grid;gap:5px;padding:4px 12px 12px 29px;border-top:1px solid var(--line-2)}
+.drow{display:grid;grid-template-columns:50px 1fr;gap:10px;align-items:baseline}
+.drow .k{font:9px/1.7 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
 .drow .v{color:var(--muted);min-width:0;overflow-wrap:anywhere;font-size:11.5px}
 .drow a{color:var(--fg);text-decoration:none;border-bottom:1px solid var(--line-2)}
 .drow a:hover{border-color:var(--fg)}
 
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;font-style:normal}
 
-footer{margin-top:30px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
-  font:10.5px/1.6 var(--mono);color:var(--faint)}
+footer{margin-top:32px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;
+  font:10px/1.6 var(--mono);color:var(--faint)}
+.legend{display:flex;gap:10px;align-items:center}
+.legend span{display:inline-flex;align-items:center;gap:4px}
+.sw{width:7px;height:7px;border-radius:2px;display:inline-block}
+.sw.up{background:var(--ok);opacity:.62}
+.sw.down{background:var(--bad)}
+.sw.empty{background:var(--empty)}
 footer a{color:var(--faint);text-decoration:none;border-bottom:1px solid var(--line-2)}
 footer a:hover{color:var(--muted)}
 
-/* admin + login */
-.login{max-width:300px;margin:12vh auto 0}
-.login .field{margin:10px 0}
-.field{display:grid;gap:5px}
-.field>label,.flabel{font:9.5px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
-input[type=password],textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);
-  border-radius:var(--radius);padding:7px 9px;font:12px/1.45 var(--mono);resize:vertical}
-input[type=password]:focus,textarea:focus{outline:2px solid color-mix(in srgb,var(--ok) 35%,transparent);outline-offset:1px}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:var(--fg);color:var(--bg);
-  border:0;border-radius:var(--radius);padding:8px 13px;font:600 11.5px/1 var(--sans);cursor:pointer;text-decoration:none}
-.btn.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
+/* ---------- admin ---------- */
+.bar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:10px;padding:10px 0 11px;
+  background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(6px);border-bottom:1px solid var(--line);margin-bottom:18px}
+.bar h1{font-size:13px;font-weight:600;margin:0}
+.bar .sp{flex:1}
+.dirty{font:10px/1 var(--mono);color:var(--warn)}
+.saved{font:10px/1 var(--mono);color:var(--ok)}
+.btn{appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;background:var(--fg);color:var(--bg);
+  border:1px solid var(--fg);border-radius:var(--radius);padding:7px 12px;font:600 11.5px/1 var(--sans);cursor:pointer;text-decoration:none}
+.btn:hover{opacity:.9}
+.btn.ghost{background:transparent;color:var(--muted);border-color:var(--line)}
+.btn.ghost:hover{color:var(--fg);border-color:var(--faint);opacity:1}
+.btn.tiny{padding:4px 8px;font-size:10.5px;font-weight:500}
 .btn:focus-visible{outline:2px solid color-mix(in srgb,var(--ok) 45%,transparent);outline-offset:2px}
-.svc{border:1px solid var(--line);border-radius:var(--radius);padding:11px 12px}
-.svc+.svc{margin-top:10px}
-.svc-h{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.field{display:grid;gap:5px}
+.field>label{font:9px/1 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--faint)}
+input[type=password],input[type=text],textarea,select{width:100%;background:var(--field);color:var(--fg);
+  border:1px solid var(--line);border-radius:var(--radius);padding:7px 9px;font:12px/1.45 var(--mono);resize:vertical}
+select{font-family:var(--sans)}
+input:focus,textarea:focus,select:focus{outline:2px solid color-mix(in srgb,var(--ok) 32%,transparent);outline-offset:1px;border-color:var(--line)}
+.svc{border:1px solid var(--line);border-radius:var(--radius);padding:11px 12px;background:var(--bg)}
+.svc+.svc{margin-top:9px}
+.svc-h{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+.svc-h .state{justify-self:auto}
 .svc-h strong{font-size:12.5px;font-weight:600}
-.svc-h .id{font:10px/1 var(--mono);color:var(--faint)}
-.svc-h .state-tag{margin-left:auto;font:9.5px/1 var(--mono);color:var(--faint)}
-.check{display:flex;align-items:center;gap:6px;font:10.5px/1 var(--mono);color:var(--faint);margin-top:7px}
+.svc-h .id{font:9.5px/1 var(--mono);color:var(--faint)}
+.svc-h .tag{margin-left:auto;font:9px/1 var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
+.svc-h .tag.on{color:var(--warn)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.check{display:flex;align-items:center;gap:6px;font:10px/1 var(--mono);color:var(--faint);margin-top:8px}
+.filter{margin-bottom:14px}
+.empty{padding:20px;text-align:center;color:var(--faint);font:11px/1.6 var(--mono)}
 .err{color:var(--bad)}
-.mt{margin-top:8px}
-footer.sp{margin-top:26px}
-.note-ok{color:var(--ok);font:10.5px/1 var(--mono)}
-.actions{display:flex;gap:9px;margin-top:16px;align-items:center}
-
+.login{max-width:320px;margin:14vh auto 0}
+.login .field{margin:10px 0}
 @media (max-width:640px){
-  .row>summary{grid-template-columns:6px 1fr 42px 13px;grid-template-areas:"s n u c" ". b b b";gap:6px 10px;padding:9px 11px}
+  .row>summary{grid-template-columns:6px 1fr 42px 12px;grid-template-areas:"s n u c" ". b b b";gap:6px 10px;padding:9px 11px}
   .state{grid-area:s}.name{grid-area:n}.num.up{grid-area:u}.chev{grid-area:c}
   .beats{grid-area:b;height:20px}.num.ms{display:none}
   .detail{padding-left:12px}
+  .grid2{grid-template-columns:1fr}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 `;
 
-const CHEVRON = `<svg class="chev" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5"/></svg>`;
+const CHEVRON = `<svg class="chev" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5"/></svg>`;
+const SUNMOON = `<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.4v1.4M8 13.2v1.4M1.4 8h1.4M13.2 8h1.4M3.3 3.3l1 1M11.7 11.7l1 1M12.7 3.3l-1 1M4.3 11.7l-1 1"/></svg>`;
 
 /* ------------------------------- render ------------------------------- */
 
@@ -516,13 +559,14 @@ function rowHtml(t, live, entry) {
 function groupBlock(group, rows) {
   const items = rows.filter((r) => r.t.group === group);
   if (!items.length) return "";
+  const up = items.filter((r) => r.state === "up").length;
   const down = items.filter((r) => r.state === "down").length;
   return `
-    <section class="group">
+    <section class="group" data-group="${esc(group)}">
       <div class="g-head">
         <h2>${esc(group)}</h2>
         <span class="rule"></span>
-        <span class="g-count ${down ? "bad" : ""}">${items.length - down}/${items.length}</span>
+        <span class="g-count ${down ? "bad" : ""}">${up}/${items.length}</span>
       </div>
       <div class="list">${items.map((r) => rowHtml(r.t, r.live, r.entry)).join("")}</div>
     </section>`;
@@ -536,7 +580,19 @@ function bannerState(rows) {
     : { cls: "partial", text: "Partially degraded" };
 }
 
-function renderPage(state, live, copy, nonce) {
+const THEME_BOOT = `try{var t=localStorage.getItem("theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}`;
+
+function head(title, nonce, desc) {
+  return `<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(title)}</title>
+<meta name="description" content="${esc(desc)}">
+<meta name="color-scheme" content="light dark">
+<style nonce="${nonce}">${CSS}</style>
+<script nonce="${nonce}">${THEME_BOOT}</script>`;
+}
+
+function renderPage(state, live, copy, notice, nonce) {
   const targets = TARGETS.map((t) => effective(t, copy));
   const rows = targets.map((t) => {
     const entry = state[t.id] || null;
@@ -544,25 +600,29 @@ function renderPage(state, live, copy, nonce) {
     return { t, entry, live: last, state: last ? (last.ok ? "up" : "down") : "unknown" };
   });
   const b = bannerState(rows);
-  const updated = state.updated || null;
   const total = rows.length;
   const down = rows.filter((r) => r.state === "down").length;
+  const hasNotice = notice && notice.text && notice.text.trim();
 
   return `<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ssoggy status</title>
-<meta name="color-scheme" content="light dark">
-<style nonce="${nonce}">${CSS}</style>
+${head("ssoggy status", nonce, "Live status for everything I host.")}
 </head>
 <body>
 <div class="wrap">
   <div class="top">
-    <h1>ssoggy status</h1>
-    <span class="meta" id="updated">${updated ? fmtTime(updated) : "checking"}</span>
+    <div class="brand">
+      <h1>ssoggy status</h1>
+      <p>Everything I host, checked from Cloudflare's edge.</p>
+    </div>
+    <div class="top-right">
+      <span class="meta" id="updated">${state.updated ? fmtTime(state.updated) : "checking"}</span>
+      <button class="iconbtn" id="theme" type="button" title="Toggle theme" aria-label="Toggle theme">${SUNMOON}</button>
+    </div>
   </div>
+
+  ${hasNotice ? `<div class="notice ${esc(notice.level || "info")}"><span>${esc(notice.text)}</span></div>` : ""}
 
   <div class="banner ${b.cls}" id="banner">
     <i aria-hidden="true"></i>
@@ -573,11 +633,26 @@ function renderPage(state, live, copy, nonce) {
   <main id="main">${GROUPS.map((g) => groupBlock(g, rows)).join("")}</main>
 
   <footer>
-    <span>90 samples · 60s · click a row</span>
+    <span class="legend">
+      <span><i class="sw up"></i>up</span>
+      <span><i class="sw down"></i>down</span>
+      <span><i class="sw empty"></i>no data</span>
+      <span>· 90 checks @ 2 min</span>
+    </span>
     <span><a href="/api/status">json</a></span>
   </footer>
 </div>
 <script nonce="${nonce}">
+(function(){
+  var btn=document.getElementById("theme");
+  btn.addEventListener("click",function(){
+    var cur=document.documentElement.getAttribute("data-theme");
+    var pref=cur||"auto";
+    var next=pref==="auto"?"light":pref==="light"?"dark":"auto";
+    try{ if(next==="auto"){localStorage.removeItem("theme");document.documentElement.removeAttribute("data-theme");}
+         else {localStorage.setItem("theme",next);document.documentElement.setAttribute("data-theme",next);} }catch(e){}
+  });
+})();
 const MS = (ms) => ms == null ? "–" : ms < 1000 ? Math.round(ms) + " ms" : (ms / 1000).toFixed(2) + " s";
 const T = (t) => t ? new Date(t).toISOString().slice(11, 19) + " UTC" : "–";
 function ago(t){ if(!t) return "never"; const s = Math.max(0, Math.round((Date.now()-t)/1000));
@@ -669,88 +744,146 @@ function renderLogin(nonce, error) {
   return `<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+${head("ssoggy status · sign in", nonce, "Admin sign in.")}
 <meta name="robots" content="noindex,nofollow">
-<title>ssoggy status · sign in</title>
-<meta name="color-scheme" content="light dark">
-<style nonce="${nonce}">${CSS}</style>
 </head>
 <body>
 <div class="wrap">
   <div class="login">
-    <div class="top"><h1>ssoggy status</h1><span class="meta">admin</span></div>
+    <div class="top">
+      <div class="brand"><h1>ssoggy status</h1><p>admin</p></div>
+    </div>
     <form method="post" action="/admin">
       <div class="field">
         <label for="key">admin key</label>
-        <input id="key" name="key" type="password" autocomplete="current-password" autofocus>
+        <input id="key" name="key" type="password" autocomplete="current-password" autofocus required>
       </div>
       ${error ? '<div class="check err">wrong key</div>' : ""}
-      <div class="actions"><button class="btn" type="submit">sign in</button></div>
+      <div style="margin-top:14px"><button class="btn" type="submit">sign in</button></div>
     </form>
-    <footer class="sp"><span>&nbsp;</span><span><a href="/">status</a></span></footer>
+    <footer><span></span><span><a href="/">status</a></span></footer>
   </div>
 </div>
 </body>
 </html>`;
 }
 
-function renderAdmin(copy, nonce, saved) {
+function renderAdmin(copy, notice, nonce, saved) {
   const groups = GROUPS.map((g) => {
     const items = TARGETS.filter((t) => t.group === g);
     return `
-      <section class="group">
+      <section class="group" data-group="${esc(g)}">
         <div class="g-head"><h2>${esc(g)}</h2><span class="rule"></span></div>
+        <div class="list-svc">
         ${items.map((t) => {
           const o = copy[t.id] || {};
+          const over = o.about != null || o.note != null;
           return `
-          <div class="svc">
+          <div class="svc" data-id="${esc(t.id)}" data-name="${esc((t.name + " " + t.id + " " + t.group).toLowerCase())}">
             <div class="svc-h">
-              <strong>${esc(t.name)}</strong><span class="id">${esc(t.id)}</span>
-              <span class="state-tag">${o.about != null || o.note != null ? "overridden" : "default"}</span>
+              <span class="state" data-live></span>
+              <strong>${esc(t.name)}</strong>
+              <span class="id">${esc(t.id)}</span>
+              <button class="btn ghost tiny" type="button" data-test="${esc(t.id)}">test</button>
+              <span class="tag ${over ? "on" : ""}">${over ? "overridden" : "default"}</span>
             </div>
-            <div class="field">
-              <label for="about-${esc(t.id)}">about</label>
-              <textarea id="about-${esc(t.id)}" name="about_${esc(t.id)}" rows="2" placeholder="${esc(t.about || "")}">${esc(o.about ?? "")}</textarea>
-            </div>
-            <div class="field mt">
-              <label for="note-${esc(t.id)}">note</label>
-              <textarea id="note-${esc(t.id)}" name="note_${esc(t.id)}" rows="2" placeholder="${esc(t.note || "")}">${esc(o.note ?? "")}</textarea>
+            <div class="grid2">
+              <div class="field">
+                <label for="about-${esc(t.id)}">about</label>
+                <textarea id="about-${esc(t.id)}" name="about_${esc(t.id)}" rows="2" placeholder="${esc(t.about || "")}">${esc(o.about ?? "")}</textarea>
+              </div>
+              <div class="field">
+                <label for="note-${esc(t.id)}">note</label>
+                <textarea id="note-${esc(t.id)}" name="note_${esc(t.id)}" rows="2" placeholder="${esc(t.note || "")}">${esc(o.note ?? "")}</textarea>
+              </div>
             </div>
             <label class="check"><input type="checkbox" name="reset_${esc(t.id)}" value="1"> reset to default</label>
           </div>`;
         }).join("")}
+        </div>
       </section>`;
   }).join("");
 
   return `<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+${head("ssoggy status · copy", nonce, "Copy editor.")}
 <meta name="robots" content="noindex,nofollow">
-<title>ssoggy status · copy</title>
-<meta name="color-scheme" content="light dark">
-<style nonce="${nonce}">${CSS}</style>
 </head>
 <body>
 <div class="wrap">
-  <div class="top">
+  <div class="bar">
     <h1>copy editor</h1>
-    <span class="meta">${saved ? '<span class="note-ok">saved</span>' : "blank = default"}</span>
+    <span class="sp"></span>
+    <span id="state" class="${saved ? "saved" : ""}">${saved ? "saved" : ""}</span>
+    <button class="btn" type="submit" form="form" id="save">save</button>
+    <a class="btn ghost" href="/">status</a>
+    <form method="post" action="/admin/logout"><button class="btn ghost" type="submit">sign out</button></form>
   </div>
-  <form method="post" action="/admin/save">
-    ${groups}
-    <div class="actions">
-      <button class="btn" type="submit">save</button>
-      <a class="btn ghost" href="/">status page</a>
+
+  <form id="form" method="post" action="/admin/save">
+    <section class="group">
+      <div class="g-head"><h2>notice</h2><span class="rule"></span></div>
+      <div class="svc">
+        <div class="grid2">
+          <div class="field">
+            <label for="notice_level">level</label>
+            <select id="notice_level" name="notice_level">
+              <option value="info"${(notice.level || "info") === "info" ? " selected" : ""}>info</option>
+              <option value="warn"${notice.level === "warn" ? " selected" : ""}>warn</option>
+              <option value="down"${notice.level === "down" ? " selected" : ""}>down</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="notice_text">banner text (blank hides it)</label>
+            <input id="notice_text" name="notice_text" type="text" value="${esc(notice.text || "")}" placeholder="e.g. Pterodactyl maintenance until 18:00 UTC">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="filter field">
+      <label for="q">filter</label>
+      <input id="q" type="text" placeholder="type to filter services…" autocomplete="off">
     </div>
+
+    ${groups}
   </form>
-  <form method="post" action="/admin/logout" class="mt">
-    <button class="btn ghost" type="submit">sign out</button>
-  </form>
+
   <footer><span>overrides · kv</span><span><a href="/">status</a></span></footer>
 </div>
+<script nonce="${nonce}">
+(function(){
+  const form=document.getElementById("form");
+  const statusEl=document.getElementById("state");
+  let dirty=false;
+  const mark=(v)=>{dirty=v;statusEl.className=v?"dirty":"saved";statusEl.textContent=v?"unsaved":statusEl.textContent;};
+  form.addEventListener("input",()=>{ if(!dirty){dirty=true;statusEl.className="dirty";statusEl.textContent="unsaved";} });
+  form.addEventListener("submit",()=>{ statusEl.className="saved";statusEl.textContent="saving…"; });
+  window.addEventListener("beforeunload",(e)=>{ if(dirty){ e.preventDefault(); e.returnValue=""; } });
+  document.addEventListener("keydown",(e)=>{
+    if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="s"){ e.preventDefault(); form.requestSubmit(); }
+  });
+  document.getElementById("q").addEventListener("input",(e)=>{
+    const q=e.target.value.trim().toLowerCase();
+    document.querySelectorAll(".svc[data-name]").forEach((el)=>{
+      el.style.display = !q || el.dataset.name.includes(q) ? "" : "none";
+    });
+  });
+  document.querySelectorAll("[data-test]").forEach((btn)=>{
+    btn.addEventListener("click",async()=>{
+      const id=btn.dataset.test, card=btn.closest(".svc"), dot=card.querySelector("[data-live]");
+      btn.disabled=true; const old=btn.textContent; btn.textContent="…";
+      try{
+        const res=await fetch("/admin/test",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id})});
+        if(res.ok){ const j=await res.json(); dot.className="state "+(j.ok?"up":"down"); dot.title=(j.ok?"up":"down")+" · "+(j.code||"")+" "+Math.round(j.ms||0)+"ms"; }
+        else { dot.className="state unknown"; }
+      }catch(e){ dot.className="state unknown"; }
+      finally{ btn.disabled=false; btn.textContent=old; }
+    });
+  });
+})();
+</script>
 </body>
 </html>`;
 }
@@ -777,7 +910,7 @@ function jsonPayload(state, live, copy) {
   };
 }
 
-/* ------------------------------- worker ------------------------------- */
+/* ------------------------------- http ------------------------------- */
 
 function nonce() {
   const b = new Uint8Array(16);
@@ -792,27 +925,56 @@ function headers(n, maxAge) {
     "content-security-policy":
       `default-src 'none'; style-src 'nonce-${n}'; script-src 'nonce-${n}'; img-src data:; ` +
       `connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+    "strict-transport-security": "max-age=31536000",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
     "referrer-policy": "no-referrer",
     "permissions-policy": "geolocation=(), microphone=(), camera=()",
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": "same-origin",
     "x-robots-tag": "noindex",
   };
 }
 
-function html(body, n, maxAge) {
-  return new Response(body, { headers: headers(n, maxAge) });
-}
+const html = (body, n, maxAge) => new Response(body, { headers: headers(n, maxAge) });
+const notFound = () => new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
+const tooLarge = () => new Response("Too large", { status: 413, headers: { "content-type": "text/plain; charset=utf-8" } });
 
-function notFound() {
-  return new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
-}
-
-function sameOrigin(request, url) {
+function sameSite(request, url) {
+  const sfs = request.headers.get("sec-fetch-site");
+  if (sfs && sfs !== "same-origin" && sfs !== "none") return false;
   const origin = request.headers.get("origin");
-  if (!origin) return true; // curl / same-origin form posts without Origin are allowed
-  try { return new URL(origin).host === url.host; } catch { return false; }
+  if (origin) {
+    try { if (new URL(origin).host !== url.host) return false; } catch { return false; }
+  }
+  return true;
 }
+
+async function readBody(request) {
+  const len = Number(request.headers.get("content-length") || "0");
+  if (len > MAX_BODY) return null;
+  const body = await request.text();
+  return body.length > MAX_BODY ? null : body;
+}
+
+async function loginBlocked(env, ip) {
+  if (!env.STATUS) return false;
+  try {
+    const v = await env.STATUS.get("rl:" + ip, "json");
+    return !!v && v.n >= LOGIN_MAX;
+  } catch { return false; }
+}
+
+async function noteFailure(env, ip) {
+  if (!env.STATUS) return;
+  try {
+    const v = (await env.STATUS.get("rl:" + ip, "json")) || { n: 0 };
+    v.n += 1;
+    await env.STATUS.put("rl:" + ip, JSON.stringify(v), { expirationTtl: LOGIN_WINDOW });
+  } catch {}
+}
+
+/* ------------------------------- worker ------------------------------- */
 
 export default {
   async scheduled(event, env, ctx) {
@@ -823,26 +985,27 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const method = request.method;
+    const ip = request.headers.get("cf-connecting-ip") || "unknown";
 
-    /* ---- admin ---- */
-    if (path.startsWith("/admin")) {
-      const authed = await isAuthed(request, env);
-
+    /* ---------- admin ---------- */
+    if (path === "/admin" || path.startsWith("/admin/")) {
       if (path === "/admin" && method === "POST") {
         if (!env.ADMIN_KEY) return notFound();
-        const len = Number(request.headers.get("content-length") || "0");
-        if (len > MAX_BODY) return new Response("Too large", { status: 413 });
-        const body = await request.text();
-        if (body.length > MAX_BODY) return new Response("Too large", { status: 413 });
+        if (await loginBlocked(env, ip)) {
+          return new Response("Too many attempts", { status: 429, headers: { "retry-after": String(LOGIN_WINDOW) } });
+        }
+        const body = await readBody(request);
+        if (body === null) return tooLarge();
         const key = (new URLSearchParams(body).get("key") || "").trim();
         const [a, b] = await Promise.all([sha256(key), sha256(env.ADMIN_KEY)]);
         if (!safeEqual(a, b)) {
-          const n1 = nonce();
-          return html(renderLogin(n1, true), n1, 0);
+          await noteFailure(env, ip);
+          const n = nonce();
+          return html(renderLogin(n, true), n, 0);
         }
         const token = await sessionToken(env);
         const n = nonce();
-        return new Response(renderAdmin(await readCopy(env), n, false), {
+        return new Response(renderAdmin(await readCopy(env), await readNotice(env), n, false), {
           status: 303,
           headers: {
             ...headers(n, 0),
@@ -855,19 +1018,29 @@ export default {
       if (path === "/admin/logout" && method === "POST") {
         return new Response(null, {
           status: 303,
-          headers: { location: "/", "set-cookie": `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0` },
+          headers: {
+            location: "/",
+            "set-cookie": `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`,
+            "clear-site-data": '"cache", "cookies", "storage"',
+          },
         });
       }
 
-      if (path === "/admin/save" && method === "POST") {
-        if (!authed) return notFound();
-        if (!sameOrigin(request, url)) return new Response("Bad origin", { status: 403 });
-        const len = Number(request.headers.get("content-length") || "0");
-        if (len > MAX_BODY) return new Response("Too large", { status: 413 });
-        const body = await request.text();
-        if (body.length > MAX_BODY) return new Response("Too large", { status: 413 });
+      const authed = await isAuthed(request, env);
+      if (!authed) {
+        if (path === "/admin" && (method === "GET" || method === "HEAD")) {
+          const n = nonce();
+          return html(renderLogin(n, false), n, 0);
+        }
+        return notFound();
+      }
 
+      if (path === "/admin/save" && method === "POST") {
+        if (!sameSite(request, url)) return new Response("Bad origin", { status: 403 });
+        const body = await readBody(request);
+        if (body === null) return tooLarge();
         const form = new URLSearchParams(body);
+
         const copy = await readCopy(env);
         for (const t of TARGETS) {
           if (form.get("reset_" + t.id)) { delete copy[t.id]; continue; }
@@ -879,26 +1052,47 @@ export default {
           if (Object.keys(entry).length) copy[t.id] = entry;
           else delete copy[t.id];
         }
-        if (env.STATUS) await env.STATUS.put(COPY_KEY, JSON.stringify(copy));
+
+        const level = ["info", "warn", "down"].includes(form.get("notice_level") || "") ? form.get("notice_level") : "info";
+        const text = (form.get("notice_text") || "").trim().slice(0, 300);
+        if (env.STATUS) {
+          await env.STATUS.put(COPY_KEY, JSON.stringify(copy));
+          await env.STATUS.put(NOTICE_KEY, JSON.stringify({ level, text }));
+        }
         return new Response(null, { status: 303, headers: { location: "/admin?saved=1" } });
       }
 
-      if (path === "/admin" && method === "GET") {
-        if (!authed) { const n2 = nonce(); return html(renderLogin(n2, false), n2, 0); }
-        const n3 = nonce();
-        return html(renderAdmin(await readCopy(env), n3, url.searchParams.get("saved") === "1"), n3, 0);
+      if (path === "/admin/test" && method === "POST") {
+        if (!sameSite(request, url)) return new Response("Bad origin", { status: 403 });
+        const body = await readBody(request);
+        if (body === null) return tooLarge();
+        let id = null;
+        try { id = JSON.parse(body).id; } catch {}
+        const target = TARGETS.find((t) => t.id === id);
+        if (!target) return notFound();
+        const r = await runOne(target);
+        const state = await readState(env);
+        record(state, r);
+        state.updated = state.updated || Date.now();
+        if (env.STATUS) { try { await env.STATUS.put(KV_KEY, JSON.stringify(state)); } catch {} }
+        return json({ id: r.id, ok: r.ok, ms: r.ms, code: r.code, note: r.note });
+      }
+
+      if (path === "/admin" && (method === "GET" || method === "HEAD")) {
+        const n = nonce();
+        return html(renderAdmin(await readCopy(env), await readNotice(env), n, url.searchParams.get("saved") === "1"), n, 0);
       }
 
       return notFound();
     }
 
-    /* ---- api ---- */
+    /* ---------- api ---------- */
     if (path === "/api/status") {
       if (method !== "GET" && method !== "HEAD") return new Response("Method not allowed", { status: 405 });
       const state = await readState(env);
       const copy = await readCopy(env);
       let live = null, fresh = state;
-      if (!state.updated || Date.now() - state.updated > 90_000) {
+      if (!state.updated || Date.now() - state.updated > 180_000) {
         const run = await runAll(env);
         live = run.byId;
         fresh = await readState(env);
@@ -907,26 +1101,27 @@ export default {
     }
 
     if (path === "/api/check") {
-      if (!(await isAuthed(request, env))) return notFound();
       if (method !== "POST") return new Response("Method not allowed", { status: 405 });
+      if (!(await isAuthed(request, env))) return notFound();
       const run = await runAll(env);
       return json({ checked: run.results.length, at: Date.now() });
     }
 
-    /* ---- page ---- */
+    /* ---------- page ---------- */
     if (path !== "/" && path !== "/index.html") return notFound();
     if (method !== "GET" && method !== "HEAD") return new Response("Method not allowed", { status: 405 });
 
     let state = await readState(env);
     let live = null;
-    if (!state.updated || Date.now() - state.updated > 90_000) {
+    if (!state.updated || Date.now() - state.updated > 180_000) {
       const run = await runAll(env);
       live = run.byId;
       state = await readState(env);
     }
     const copy = await readCopy(env);
+    const notice = await readNotice(env);
     const n = nonce();
-    return html(renderPage(state, live, copy, n), n, 20);
+    return html(renderPage(state, live, copy, notice, n), n, 20);
   },
 };
 
@@ -937,6 +1132,7 @@ function json(obj) {
       "cache-control": "no-store",
       "access-control-allow-origin": "*",
       "x-content-type-options": "nosniff",
+      "strict-transport-security": "max-age=31536000",
     },
   });
 }

@@ -11,7 +11,7 @@ binding = "STATUS"
 id = "f32747945af24fa99ad018929de54c63"
 
 [triggers]
-crons = ["* * * * *"]
+crons = ["*/2 * * * *"]
 
 [[routes]]
 pattern = "status.ssoggy.com/*"
