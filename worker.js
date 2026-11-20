@@ -3,10 +3,13 @@ import { connect } from "cloudflare:sockets";
 /**
  * ssoggy status — Cloudflare Worker
  *
- * Per-service copy lives in TARGETS below:
- *   about: what the thing is (shown in the expanded row)
- *   note:  anything you want to say — known issues, quirks, "ignore the 502 on Tuesdays"
- *          Shown in the expanded row under "Note". Leave it out if there's nothing to say.
+ * Copy per service: TARGETS.about / TARGETS.note are the defaults.
+ * Overrides live in KV and are edited at /admin?key=…  (settings → admin key)
+ *
+ * GET  /            status page
+ * GET  /api/status  JSON
+ * GET  /api/check   force a check run
+ * GET  /admin?key=  copy editor
  */
 
 const TARGETS = [
@@ -15,7 +18,6 @@ const TARGETS = [
     id: "minecraft", name: "Minecraft", group: "Game", type: "mc", host: "mc.ssoggy.com", port: 25565,
     sub: "mc.ssoggy.com:25565",
     about: "Velocity proxy on the Oracle box, forwarding to the Nest container.",
-    // note: "",
   },
 
   // ---- Vercel ----
@@ -52,6 +54,22 @@ const HTTP_TIMEOUT = 7000;
 const MC_TIMEOUT = 6000;
 const KV_KEY = "state:v2";
 const KV_KEY_OLD = "state:v1";
+const COPY_KEY = "copy:v1";
+
+/* ------------------------------- copy ------------------------------- */
+
+async function readCopy(env) {
+  if (!env.STATUS) return {};
+  try {
+    const c = await env.STATUS.get(COPY_KEY, "json");
+    return c && typeof c === "object" ? c : {};
+  } catch { return {}; }
+}
+
+function effective(t, copy) {
+  const o = (copy && copy[t.id]) || {};
+  return { ...t, about: o.about ?? t.about ?? null, note: o.note ?? t.note ?? null };
+}
 
 /* ------------------------------- checks ------------------------------- */
 
@@ -64,7 +82,7 @@ async function checkHttp(t) {
       method: "GET",
       redirect: "follow",
       signal: ac.signal,
-      headers: { "user-agent": "ssoggy-status/3.0 (+status.ssoggy.com)" },
+      headers: { "user-agent": "ssoggy-status/3.1 (+status.ssoggy.com)" },
       cf: { cacheTtl: 0, cacheEverything: false },
     });
     const ms = Date.now() - started;
@@ -240,7 +258,7 @@ async function readState(env) {
 
 /* ------------------------------- helpers ------------------------------- */
 
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 function uptimeOf(entry) {
   if (!entry) return null;
@@ -295,6 +313,95 @@ function whyText(t, last) {
 /* ------------------------------- render ------------------------------- */
 
 const CHEVRON = `<svg class="chev" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>`;
+
+const CSS = `
+:root{
+  --bg:#ffffff; --fg:#16181c; --muted:#70757d; --faint:#9aa0a8;
+  --line:#e4e6ea; --line-2:#f0f1f4;
+  --ok:#1a9d54; --bad:#d1332e; --warn:#a8710a; --empty:#e9ebee;
+  --panel:#fafbfc;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#0d0f12; --fg:#e7e9ec; --muted:#8b9199; --faint:#666c75;
+    --line:#232730; --line-2:#1a1e25; --ok:#35c46b; --bad:#ff6361; --warn:#d29922; --empty:#232730; --panel:#111418; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:13.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.wrap{max-width:820px;margin:0 auto;padding:30px 20px 44px}
+.top{display:flex;align-items:baseline;gap:10px;margin-bottom:18px}
+h1{font-size:14px;font-weight:600;margin:0;letter-spacing:-.005em}
+.meta{margin-left:auto;font-size:11px;color:var(--faint);font-family:var(--mono)}
+.banner{display:flex;align-items:center;gap:9px;font-size:12.5px;font-weight:550;
+  padding:9px 12px;margin-bottom:22px;border:1px solid var(--line);border-left-width:3px;border-radius:3px}
+.banner.ok{border-left-color:var(--ok);color:var(--ok);background:color-mix(in srgb,var(--ok) 6%,transparent)}
+.banner.partial{border-left-color:var(--warn);color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,transparent)}
+.banner.major{border-left-color:var(--bad);color:var(--bad);background:color-mix(in srgb,var(--bad) 7%,transparent)}
+.banner .n{margin-left:auto;font-weight:500;font-family:var(--mono);font-size:11px;opacity:.9}
+.group{margin:0 0 20px}
+.g-head{display:flex;align-items:baseline;gap:8px;margin:0 0 7px}
+.g-head h2{font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0}
+.g-count{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.g-count.bad{color:var(--bad)}
+.list{border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.row{border-top:1px solid var(--line-2)}
+.row:first-child{border-top:0}
+.row>summary{display:grid;grid-template-columns:8px minmax(120px,1fr) minmax(0,2.2fr) 52px 58px 14px;
+  gap:12px;align-items:center;padding:8px 12px;cursor:pointer;list-style:none;user-select:none}
+.row>summary::-webkit-details-marker{display:none}
+.row>summary::marker{content:""}
+.row>summary:hover{background:var(--panel)}
+.row[open]{background:var(--panel)}
+.state{width:6px;height:6px;border-radius:50%;background:var(--faint)}
+.state.up{background:var(--ok)}
+.state.down{background:var(--bad)}
+.name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.beats{display:flex;gap:2px;height:24px;align-items:stretch;min-width:0}
+.beat{flex:1 1 0;min-width:1px;border-radius:1px;background:var(--empty)}
+.beat.up{background:var(--ok);opacity:.75}
+.beat.down{background:var(--bad)}
+.beat.empty{opacity:.5}
+.num{font-family:var(--mono);font-size:11px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.num.ms{color:var(--faint)}
+.chev{color:var(--faint);transition:transform .14s ease;justify-self:end}
+.row[open] .chev{transform:rotate(90deg)}
+.detail{display:grid;gap:3px;padding:2px 12px 11px 32px;font-size:12px}
+.drow{display:grid;grid-template-columns:56px 1fr;gap:10px}
+.drow .k{font-family:var(--mono);font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);padding-top:2px}
+.drow .v{color:var(--muted);min-width:0;overflow-wrap:anywhere}
+.drow a{color:var(--fg);text-decoration:none;border-bottom:1px solid var(--line)}
+.drow a:hover{border-color:var(--fg)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;font-style:normal}
+footer{margin-top:26px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  font-size:11px;color:var(--faint);font-family:var(--mono)}
+footer a{color:var(--faint);text-decoration:none;border-bottom:1px solid var(--line)}
+footer a:hover{color:var(--fg)}
+@media (max-width:640px){
+  .row>summary{grid-template-columns:8px 1fr 44px 14px;grid-template-areas:"state name up chev" ". beats beats beats";gap:5px 10px;padding:9px 11px}
+  .state{grid-area:state}.name{grid-area:name}.num.up{grid-area:up}.chev{grid-area:chev}
+  .beats{grid-area:beats;height:20px}.num.ms{display:none}
+  .detail{padding-left:14px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* admin */
+.admin{display:grid;gap:16px}
+.field{display:grid;gap:5px}
+.field label{font-family:var(--mono);font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint)}
+textarea,input[type=text]{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);
+  border-radius:3px;padding:7px 9px;font:12.5px/1.45 inherit;resize:vertical}
+textarea:focus,input:focus{outline:2px solid color-mix(in srgb,var(--ok) 40%,transparent);outline-offset:1px;border-color:var(--line)}
+.svc{border:1px solid var(--line);border-radius:3px;padding:12px}
+.svc-h{display:flex;align-items:baseline;gap:8px;margin-bottom:9px}
+.svc-h strong{font-size:13px;font-weight:600}
+.svc-h span{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.btn{display:inline-flex;align-items:center;gap:6px;background:var(--fg);color:var(--bg);border:0;
+  border-radius:3px;padding:8px 14px;font:600 12px/1 inherit;cursor:pointer}
+.btn.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
+.saved{color:var(--ok);font-size:12px;font-family:var(--mono)}
+`;
 
 function beatBars(entry) {
   const beats = (entry?.history || []).map(normBeat).slice(-HISTORY);
@@ -372,8 +479,9 @@ function bannerState(rows) {
     : { cls: "partial", text: "Partially degraded" };
 }
 
-function renderPage(state, live) {
-  const rows = TARGETS.map((t) => {
+function renderPage(state, live, copy) {
+  const targets = TARGETS.map((t) => effective(t, copy));
+  const rows = targets.map((t) => {
     const entry = state[t.id] || null;
     const last = live ? live[t.id] : entry?.last || null;
     return { t, entry, live: last, state: last ? (last.ok ? "up" : "down") : "unknown" };
@@ -390,78 +498,7 @@ function renderPage(state, live) {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ssoggy status</title>
 <meta name="color-scheme" content="light dark">
-<style>
-:root{
-  --bg:#ffffff; --fg:#16181c; --muted:#70757d; --faint:#9aa0a8;
-  --line:#e4e6ea; --line-2:#f0f1f4;
-  --ok:#1a9d54; --bad:#d1332e; --warn:#a8710a; --empty:#e9ebee;
-  --panel:#fafbfc;
-  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
-}
-@media (prefers-color-scheme: dark){
-  :root{ --bg:#0d0f12; --fg:#e7e9ec; --muted:#8b9199; --faint:#666c75;
-    --line:#232730; --line-2:#1a1e25; --ok:#35c46b; --bad:#ff6361; --warn:#d29922; --empty:#232730; --panel:#111418; }
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);
-  font:13.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
-  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
-.wrap{max-width:820px;margin:0 auto;padding:30px 20px 44px}
-.top{display:flex;align-items:baseline;gap:10px;margin-bottom:18px}
-h1{font-size:14px;font-weight:600;margin:0;letter-spacing:-.005em}
-.meta{margin-left:auto;font-size:11px;color:var(--faint);font-family:var(--mono)}
-.banner{display:flex;align-items:center;gap:9px;font-size:12.5px;font-weight:550;
-  padding:9px 12px;margin-bottom:22px;border:1px solid var(--line);border-left-width:3px;border-radius:3px}
-.banner.ok{border-left-color:var(--ok);color:var(--ok);background:color-mix(in srgb,var(--ok) 6%,transparent)}
-.banner.partial{border-left-color:var(--warn);color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,transparent)}
-.banner.major{border-left-color:var(--bad);color:var(--bad);background:color-mix(in srgb,var(--bad) 7%,transparent)}
-.banner .n{margin-left:auto;font-weight:500;font-family:var(--mono);font-size:11px;opacity:.9}
-.group{margin:0 0 20px}
-.g-head{display:flex;align-items:baseline;gap:8px;margin:0 0 7px}
-.g-head h2{font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0}
-.g-count{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
-.g-count.bad{color:var(--bad)}
-.list{border:1px solid var(--line);border-radius:3px;overflow:hidden}
-.row{border-top:1px solid var(--line-2)}
-.row:first-child{border-top:0}
-.row>summary{display:grid;grid-template-columns:8px minmax(120px,1fr) minmax(0,2.2fr) 52px 58px 14px;
-  gap:12px;align-items:center;padding:8px 12px;cursor:pointer;list-style:none;user-select:none}
-.row>summary::-webkit-details-marker{display:none}
-.row>summary::marker{content:""}
-.row>summary:hover{background:var(--panel)}
-.row[open]{background:var(--panel)}
-.state{width:6px;height:6px;border-radius:50%;background:var(--faint)}
-.state.up{background:var(--ok)}
-.state.down{background:var(--bad)}
-.name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.beats{display:flex;gap:2px;height:24px;align-items:stretch;min-width:0}
-.beat{flex:1 1 0;min-width:1px;border-radius:1px;background:var(--empty)}
-.beat.up{background:var(--ok);opacity:.75}
-.beat.down{background:var(--bad)}
-.beat.empty{opacity:.5}
-.num{font-family:var(--mono);font-size:11px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-.num.ms{color:var(--faint)}
-.chev{color:var(--faint);transition:transform .14s ease;justify-self:end}
-.row[open] .chev{transform:rotate(90deg)}
-.detail{display:grid;gap:3px;padding:2px 12px 11px 32px;font-size:12px}
-.drow{display:grid;grid-template-columns:56px 1fr;gap:10px}
-.drow .k{font-family:var(--mono);font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);padding-top:2px}
-.drow .v{color:var(--muted);min-width:0;overflow-wrap:anywhere}
-.drow a{color:var(--fg);text-decoration:none;border-bottom:1px solid var(--line)}
-.drow a:hover{border-color:var(--fg)}
-.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;font-style:normal}
-footer{margin-top:26px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
-  font-size:11px;color:var(--faint);font-family:var(--mono)}
-footer a{color:var(--faint);text-decoration:none;border-bottom:1px solid var(--line)}
-footer a:hover{color:var(--fg)}
-@media (max-width:640px){
-  .row>summary{grid-template-columns:8px 1fr 44px 14px;grid-template-areas:"state name up chev" ". beats beats beats";gap:5px 10px;padding:9px 11px}
-  .state{grid-area:state}.name{grid-area:name}.num.up{grid-area:up}.chev{grid-area:chev}
-  .beats{grid-area:beats;height:20px}.num.ms{display:none}
-  .detail{padding-left:14px}
-}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}}
-</style>
+<style>${CSS}</style>
 </head>
 <body>
 <div class="wrap">
@@ -488,7 +525,7 @@ const T = (t) => t ? new Date(t).toISOString().slice(11, 19) + " UTC" : "–";
 function ago(t){ if(!t) return "never"; const s = Math.max(0, Math.round((Date.now()-t)/1000));
   return s < 60 ? s + "s ago" : s < 3600 ? Math.round(s/60) + "m ago" : Math.round(s/3600) + "h ago"; }
 function why(t){
-  const st = t.status, note = t.note || "";
+  const st = t.status, note = t.error || "";
   if (!t.lastChecked) return "No check data yet — the next run fills this in.";
   if (st === "up") {
     if (t.type === "mc") {
@@ -570,10 +607,70 @@ setInterval(refresh, 30000);
 </html>`;
 }
 
-function jsonPayload(state, live) {
+function renderAdmin(copy, key, saved) {
+  const groups = GROUPS.map((g) => {
+    const items = TARGETS.filter((t) => t.group === g);
+    return `
+      <section class="group">
+        <div class="g-head"><h2>${esc(g)}</h2></div>
+        <div class="admin">
+          ${items.map((t) => {
+            const o = copy[t.id] || {};
+            return `
+            <div class="svc">
+              <div class="svc-h"><strong>${esc(t.name)}</strong><span>${esc(t.id)}</span></div>
+              <div class="field">
+                <label for="about-${esc(t.id)}">about · ${o.about != null ? "overridden" : "default"}</label>
+                <textarea id="about-${esc(t.id)}" name="about_${esc(t.id)}" rows="2" placeholder="${esc(t.about || "no default")}">${esc(o.about ?? "")}</textarea>
+              </div>
+              <div class="field" style="margin-top:8px">
+                <label for="note-${esc(t.id)}">note · ${o.note != null ? "overridden" : "default"}</label>
+                <textarea id="note-${esc(t.id)}" name="note_${esc(t.id)}" rows="2" placeholder="${esc(t.note || "no default")}">${esc(o.note ?? "")}</textarea>
+              </div>
+              <div class="field" style="margin-top:8px">
+                <label><input type="checkbox" name="reset_${esc(t.id)}" value="1"> reset to default</label>
+              </div>
+            </div>`;
+          }).join("")}
+        </div>
+      </section>`;
+  }).join("");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>ssoggy status · copy editor</title>
+<meta name="color-scheme" content="light dark">
+<style>${CSS}</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>copy editor</h1>
+    <span class="meta">${saved ? '<span class="saved">saved</span>' : "blank = use default"}</span>
+  </div>
+  ${saved ? "" : ""}
+  <form method="post" action="/admin?key=${encodeURIComponent(key)}">
+    ${groups}
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn" type="submit">save changes</button>
+      <a class="btn ghost" href="/">back to status</a>
+    </div>
+  </form>
+  <footer><span>overrides live in KV · key required</span><span><a href="/">status</a></span></footer>
+</div>
+</body>
+</html>`;
+}
+
+function jsonPayload(state, live, copy) {
   return {
     updated: state.updated || Date.now(),
-    targets: TARGETS.map((t) => {
+    targets: TARGETS.map((t0) => {
+      const t = effective(t0, copy);
       const entry = state[t.id] || null;
       const last = (live && live[t.id]) || entry?.last || null;
       return {
@@ -593,6 +690,13 @@ function jsonPayload(state, live) {
 
 /* ------------------------------- worker ------------------------------- */
 
+function safeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let out = 0;
+  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return out === 0;
+}
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(runAll(env));
@@ -602,8 +706,38 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
+    /* ---- admin ---- */
+    if (path === "/admin") {
+      const key = url.searchParams.get("key") || "";
+      const secret = env.ADMIN_KEY;
+      if (!secret || !key || !safeEqual(key, secret)) return new Response("Not found", { status: 404 });
+
+      if (request.method === "POST") {
+        const body = await request.text();
+        const form = new URLSearchParams(body);
+        const copy = await readCopy(env);
+        for (const t of TARGETS) {
+          if (form.get("reset_" + t.id)) { delete copy[t.id]; continue; }
+          const about = (form.get("about_" + t.id) || "").trim();
+          const note = (form.get("note_" + t.id) || "").trim();
+          const entry = {};
+          if (about) entry.about = about.slice(0, 500);
+          if (note) entry.note = note.slice(0, 500);
+          if (Object.keys(entry).length) copy[t.id] = entry;
+          else delete copy[t.id];
+        }
+        if (env.STATUS) await env.STATUS.put(COPY_KEY, JSON.stringify(copy));
+        return Response.redirect(new URL("/admin?key=" + encodeURIComponent(key) + "&saved=1", url).toString(), 303);
+      }
+
+      const copy = await readCopy(env);
+      return html(renderAdmin(copy, key, url.searchParams.get("saved") === "1"), 0);
+    }
+
+    /* ---- api ---- */
     if (path === "/api/status" || path === "/api/check") {
       const state = await readState(env);
+      const copy = await readCopy(env);
       const stale = path === "/api/check" || !state.updated || Date.now() - state.updated > 90_000;
       let live = null, fresh = state;
       if (stale) {
@@ -611,9 +745,10 @@ export default {
         live = run.byId;
         fresh = await readState(env);
       }
-      return json(jsonPayload(fresh, live));
+      return json(jsonPayload(fresh, live, copy));
     }
 
+    /* ---- page ---- */
     if (path !== "/" && path !== "/index.html") {
       return new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
     }
@@ -625,17 +760,23 @@ export default {
       live = run.byId;
       state = await readState(env);
     }
-    return new Response(renderPage(state, live), {
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "public, max-age=20",
-        "x-frame-options": "DENY",
-        "referrer-policy": "no-referrer",
-        "x-content-type-options": "nosniff",
-      },
-    });
+    const copy = await readCopy(env);
+    return html(renderPage(state, live, copy), 20);
   },
 };
+
+function html(body, maxAge) {
+  return new Response(body, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": maxAge ? `public, max-age=${maxAge}` : "no-store",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+      "x-robots-tag": "noindex",
+    },
+  });
+}
 
 function json(obj) {
   return new Response(JSON.stringify(obj, null, 2), {
