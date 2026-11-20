@@ -788,7 +788,7 @@ function nonce() {
 function headers(n, maxAge) {
   return {
     "content-type": "text/html; charset=utf-8",
-    "cache-control": maxAge ? `public, max-age=${maxAge}` : "no-store",
+    "cache-control": maxAge ? `private, max-age=${maxAge}` : "no-store",
     "content-security-policy":
       `default-src 'none'; style-src 'nonce-${n}'; script-src 'nonce-${n}'; img-src data:; ` +
       `connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
