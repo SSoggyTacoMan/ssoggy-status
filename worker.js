@@ -2,35 +2,48 @@ import { connect } from "cloudflare:sockets";
 
 /**
  * ssoggy status — Cloudflare Worker
- * Each monitor expands (click) to show its link, last check, response time and why it's down.
+ *
+ * Per-service copy lives in TARGETS below:
+ *   about: what the thing is (shown in the expanded row)
+ *   note:  anything you want to say — known issues, quirks, "ignore the 502 on Tuesdays"
+ *          Shown in the expanded row under "Note". Leave it out if there's nothing to say.
  */
 
 const TARGETS = [
   // ---- Game ----
-  { id: "minecraft", name: "Minecraft", group: "Game", type: "mc", host: "mc.ssoggy.com", port: 25565, sub: "mc.ssoggy.com:25565" },
+  {
+    id: "minecraft", name: "Minecraft", group: "Game", type: "mc", host: "mc.ssoggy.com", port: 25565,
+    sub: "mc.ssoggy.com:25565",
+    about: "Velocity proxy on the Oracle box, forwarding to the Nest container.",
+    // note: "",
+  },
 
   // ---- Vercel ----
-  { id: "taalswipe", name: "TaalSwipe", group: "Vercel", type: "http", url: "https://taalswipe.ssoggy.com/" },
-  { id: "minimusiclab", name: "MiniMusicLab", group: "Vercel", type: "http", url: "https://minimusiclab.ssoggy.com/" },
-  { id: "sprig", name: "Sprig", group: "Vercel", type: "http", url: "https://sprig.ssoggy.com/" },
-  { id: "excel-dash", name: "Excel Dash (preview)", group: "Vercel", type: "http", url: "https://excel-dash-preview.ssoggy.com/" },
-  { id: "ssoggysouls", name: "SSoggySouls Docs", group: "Vercel", type: "http", url: "https://ssoggysouls.ssoggy.com/" },
-  { id: "portfolio", name: "Portfolio", group: "Vercel", type: "http", url: "https://maarenaurich.com/" },
-  { id: "vishandel", name: "Vishandel Volendam", group: "Vercel", type: "http", url: "https://vishandelvolendam.maarenaurich.com/" },
+  { id: "taalswipe", name: "TaalSwipe", group: "Vercel", type: "http", url: "https://taalswipe.ssoggy.com/", about: "Vercel · production branch." },
+  { id: "minimusiclab", name: "MiniMusicLab", group: "Vercel", type: "http", url: "https://minimusiclab.ssoggy.com/", about: "Vercel · static site." },
+  { id: "sprig", name: "Sprig", group: "Vercel", type: "http", url: "https://sprig.ssoggy.com/", about: "Vercel · takes a couple of seconds on cold start." },
+  { id: "excel-dash", name: "Excel Dash (preview)", group: "Vercel", type: "http", url: "https://excel-dash-preview.ssoggy.com/", about: "Vercel · preview build." },
+  { id: "ssoggysouls", name: "SSoggySouls Docs", group: "Vercel", type: "http", url: "https://ssoggysouls.ssoggy.com/", about: "Jekyll docs, built by Vercel from the mod repo." },
+  { id: "portfolio", name: "Portfolio", group: "Vercel", type: "http", url: "https://maarenaurich.com/", about: "Vercel · apex of maarenaurich.com." },
+  { id: "vishandel", name: "Vishandel Volendam", group: "Vercel", type: "http", url: "https://vishandelvolendam.maarenaurich.com/", about: "Vercel · client site." },
 
   // ---- Cloudflare Pages ----
-  { id: "ai", name: "AI Chat", group: "Cloudflare Pages", type: "http", url: "https://ai.ssoggy.com/" },
-  { id: "oba", name: "Beleggers Academie", group: "Cloudflare Pages", type: "http", url: "https://oba.ssoggy.com/" },
-  { id: "cev", name: "CEV Dashboard", group: "Cloudflare Pages", type: "http", url: "https://cev.ssoggy.com/" },
+  { id: "ai", name: "AI Chat", group: "Cloudflare Pages", type: "http", url: "https://ai.ssoggy.com/", about: "Cloudflare Pages · ai-chat-export." },
+  { id: "oba", name: "Beleggers Academie", group: "Cloudflare Pages", type: "http", url: "https://oba.ssoggy.com/", about: "Cloudflare Pages · online-beleggers-academie." },
+  { id: "cev", name: "CEV Dashboard", group: "Cloudflare Pages", type: "http", url: "https://cev.ssoggy.com/", about: "Cloudflare Pages · same project as OBA, different route." },
 
   // ---- GitHub Pages ----
-  { id: "ghpages", name: "GitHub Pages", group: "GitHub Pages", type: "http", url: "https://ssoggytacoblud.github.io/" },
+  { id: "ghpages", name: "GitHub Pages", group: "GitHub Pages", type: "http", url: "https://ssoggytacoblud.github.io/", about: "Static site served by GitHub Pages." },
 
   // ---- Nest VPS ----
-  { id: "panel", name: "Pterodactyl Panel", group: "Nest VPS", type: "http", url: "https://panel.ssoggy.me/", okUpTo: 499 },
-  { id: "router", name: "Router", group: "Nest VPS", type: "http", url: "https://router.ssoggy.me/", okUpTo: 499 },
-  { id: "chat", name: "OpenWebUI (chat)", group: "Nest VPS", type: "http", url: "https://chat.ssoggy.me/", okUpTo: 499 },
-  { id: "node", name: "Pterodactyl Node", group: "Nest VPS", type: "http", url: "https://node.ssoggy.me/", okUpTo: 499 },
+  { id: "panel", name: "Pterodactyl Panel", group: "Nest VPS", type: "http", url: "https://panel.ssoggy.me/", okUpTo: 499, about: "Nest container, behind the hackclub reverse proxy." },
+  { id: "router", name: "Router", group: "Nest VPS", type: "http", url: "https://router.ssoggy.me/", okUpTo: 499, about: "Nest container, port 20128." },
+  {
+    id: "chat", name: "OpenWebUI (chat)", group: "Nest VPS", type: "http", url: "https://chat.ssoggy.me/", okUpTo: 499,
+    about: "OpenWebUI on the Nest container, port 3000.",
+    note: "Returns 502 whenever the container restarts — the proxy is fine, the app isn't up yet.",
+  },
+  { id: "node", name: "Pterodactyl Node", group: "Nest VPS", type: "http", url: "https://node.ssoggy.me/", okUpTo: 499, about: "Wings daemon. 401 is expected — it means it's alive." },
 ];
 
 const GROUPS = ["Game", "Vercel", "Cloudflare Pages", "GitHub Pages", "Nest VPS"];
@@ -51,7 +64,7 @@ async function checkHttp(t) {
       method: "GET",
       redirect: "follow",
       signal: ac.signal,
-      headers: { "user-agent": "ssoggy-status/2.1 (+status.ssoggy.com)" },
+      headers: { "user-agent": "ssoggy-status/3.0 (+status.ssoggy.com)" },
       cf: { cacheTtl: 0, cacheEverything: false },
     });
     const ms = Date.now() - started;
@@ -253,17 +266,15 @@ const fmtAgo = (t) => {
   return Math.round(s / 3600) + "h ago";
 };
 
-/** Human explanation of the current state. */
 function whyText(t, last) {
-  if (!last) return "No check data yet — the next run will fill this in.";
+  if (!last) return "No check data yet — the next run fills this in.";
   if (last.ok) {
     if (t.type === "mc") {
       const p = last.players ? `${last.players.online}/${last.players.max} players` : "no player data";
       return `Accepting connections. ${p}${last.version ? ", " + last.version : ""}.`;
     }
-    const code = last.code ? `HTTP ${last.code}` : "connected";
-    if (last.code && last.code >= 400) return `Responding (${code}) — it's up, but the app wants auth or a different path.`;
-    return `Responding normally (${code}) in ${fmtMs(last.ms)}.`;
+    if (last.code && last.code >= 400) return `Responding (HTTP ${last.code}) — up, but the app wants auth or a different path.`;
+    return `Responding normally${last.code ? ` (HTTP ${last.code})` : ""} in ${fmtMs(last.ms)}.`;
   }
   const note = last.note || "";
   if (t.type === "mc") {
@@ -272,7 +283,7 @@ function whyText(t, last) {
     if (/dns/i.test(note)) return "DNS lookup failed — the hostname doesn't resolve.";
     return `Minecraft check failed: ${note || "unknown error"}.`;
   }
-  if (/^HTTP 5\d\d/.test(note)) return `${note} — Cloudflare reached the origin, but the app behind it is failing (crash, bad upstream, or TLS on the origin).`;
+  if (/^HTTP 5\d\d/.test(note)) return `${note} — Cloudflare reached the origin, but the app behind it is failing (crash, bad upstream, or TLS at the origin).`;
   if (/^HTTP 4\d\d/.test(note)) return `${note} — the server answered, but not with the page (wrong host, removed route, or auth wall).`;
   if (/timeout/i.test(note)) return "No response within 7s — the server is unreachable or hanging.";
   if (/dns/i.test(note)) return "DNS lookup failed — the hostname doesn't resolve.";
@@ -283,41 +294,22 @@ function whyText(t, last) {
 
 /* ------------------------------- render ------------------------------- */
 
+const CHEVRON = `<svg class="chev" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>`;
+
 function beatBars(entry) {
   const beats = (entry?.history || []).map(normBeat).slice(-HISTORY);
   const pad = Math.max(0, HISTORY - beats.length);
   const cells = [];
-  for (let i = 0; i < pad; i++) cells.push('<span class="beat empty"></span>');
+  for (let i = 0; i < pad; i++) cells.push('<i class="beat empty"></i>');
   for (const b of beats) {
     const cls = b.ok ? "up" : "down";
     const label = `${b.ok ? "Up" : "Down"} · ${fmtTime(b.t)}${b.ms != null ? " · " + fmtMs(b.ms) : ""}`;
-    cells.push(`<span class="beat ${cls}" title="${esc(label)}"></span>`);
+    cells.push(`<i class="beat ${cls}" title="${esc(label)}"></i>`);
   }
   return cells.join("");
 }
 
-function panelHtml(t, last, entry) {
-  const state = last ? (last.ok ? "up" : "down") : "unknown";
-  const link = t.url
-    ? `<a href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">${esc(t.url)}</a>`
-    : `<span class="v">${esc(t.sub || t.host)}</span>`;
-  const beats = (entry?.history || []).map(normBeat);
-  const downBeats = beats.filter((b) => !b.ok).length;
-  const range = beats.length
-    ? `${beats.length} checks · ${downBeats} failed`
-    : "no history yet";
-
-  return `
-      <div class="panel">
-        <div class="prow"><span class="k">Link</span><span class="v">${link}</span></div>
-        <div class="prow"><span class="k">Status</span><span class="v" data-f="p-status">${state}${last?.code ? " · HTTP " + last.code : ""}</span></div>
-        <div class="prow"><span class="k">Why</span><span class="v" data-f="p-why">${esc(whyText(t, last))}</span></div>
-        <div class="prow"><span class="k">Last check</span><span class="v" data-f="p-last">${last?.t ? fmtAgo(last.t) + " · " + fmtTime(last.t) : "never"}</span></div>
-        <div class="prow"><span class="k">History</span><span class="v">${esc(range)}</span></div>
-      </div>`;
-}
-
-function monitorRow(t, live, entry) {
+function rowHtml(t, live, entry) {
   const last = live || entry?.last || null;
   const state = last ? (last.ok ? "up" : "down") : "unknown";
   const up = uptimeOf(entry);
@@ -330,24 +322,31 @@ function monitorRow(t, live, entry) {
   if (last?.note && state !== "up") bits.push(last.note);
   const sub = bits.length ? bits.join(" · ") : (t.sub || t.url);
 
+  const link = t.url
+    ? `<a href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">${esc(t.url.replace(/^https?:\/\//, "").replace(/\/$/, ""))}</a>`
+    : `<span>${esc(t.sub || t.host)}</span>`;
+  const beats = (entry?.history || []).map(normBeat);
+  const failed = beats.filter((b) => !b.ok).length;
+
   return `
-      <details class="mon" data-id="${esc(t.id)}">
-        <summary class="monitor">
-          <div class="m-left">
-            <span class="caret" aria-hidden="true"></span>
-            <span class="pill ${state}" aria-hidden="true"></span>
-            <div class="m-text">
-              <div class="m-name">${esc(t.name)}<span class="sr"> — ${state}</span></div>
-              <div class="m-sub" title="${esc(sub)}">${esc(sub)}</div>
-            </div>
-          </div>
-          <div class="m-beats" aria-label="${esc(t.name)} heartbeats">${beatBars(entry)}</div>
-          <div class="m-right">
-            <div class="m-uptime">${up != null ? (up * 100).toFixed(up >= 0.995 ? 1 : 2) + "%" : "–"}</div>
-            <div class="m-ping">${avg != null ? fmtMs(avg) : "–"}</div>
-          </div>
+      <details class="row" data-id="${esc(t.id)}">
+        <summary>
+          <span class="state ${state}" aria-hidden="true"></span>
+          <span class="name">${esc(t.name)}<em class="sr"> — ${state}</em></span>
+          <span class="beats">${beatBars(entry)}</span>
+          <span class="num up">${up != null ? (up * 100).toFixed(up >= 0.995 ? 1 : 2) + "%" : "–"}</span>
+          <span class="num ms">${avg != null ? fmtMs(avg) : "–"}</span>
+          ${CHEVRON}
         </summary>
-        ${panelHtml(t, last, entry)}
+        <div class="detail">
+          <div class="drow"><span class="k">host</span><span class="v">${link}</span></div>
+          <div class="drow"><span class="k">status</span><span class="v" data-f="p-status">${state}${last?.code ? " · HTTP " + last.code : ""}</span></div>
+          <div class="drow"><span class="k">why</span><span class="v" data-f="p-why">${esc(whyText(t, last))}</span></div>
+          ${t.about ? `<div class="drow"><span class="k">about</span><span class="v">${esc(t.about)}</span></div>` : ""}
+          ${t.note ? `<div class="drow"><span class="k">note</span><span class="v">${esc(t.note)}</span></div>` : ""}
+          <div class="drow"><span class="k">fresh</span><span class="v" data-f="p-last">${last?.t ? fmtAgo(last.t) + " · " + fmtTime(last.t) : "never"}</span></div>
+          <div class="drow"><span class="k">sample</span><span class="v">${beats.length ? `${beats.length} checks · ${failed} failed` : "no history yet"}</span></div>
+        </div>
       </details>`;
 }
 
@@ -359,18 +358,18 @@ function groupBlock(group, rows) {
     <section class="group">
       <div class="g-head">
         <h2>${esc(group)}</h2>
-        <span class="g-count ${down ? "bad" : ""}">${items.length - down}/${items.length} up</span>
+        <span class="g-count ${down ? "bad" : ""}">${items.length - down}/${items.length}</span>
       </div>
-      <div class="card">${items.map((r) => monitorRow(r.t, r.live, r.entry)).join("")}</div>
+      <div class="list">${items.map((r) => rowHtml(r.t, r.live, r.entry)).join("")}</div>
     </section>`;
 }
 
 function bannerState(rows) {
   const down = rows.filter((r) => r.state === "down").length;
-  if (!down) return { cls: "ok", text: "All Systems Operational" };
+  if (!down) return { cls: "ok", text: "All systems operational" };
   return (down / rows.length) >= 0.5
-    ? { cls: "major", text: "Major Outage" }
-    : { cls: "partial", text: "Partially Degraded Service" };
+    ? { cls: "major", text: "Major outage" }
+    : { cls: "partial", text: "Partially degraded" };
 }
 
 function renderPage(state, live) {
@@ -393,73 +392,73 @@ function renderPage(state, live) {
 <meta name="color-scheme" content="light dark">
 <style>
 :root{
-  --bg:#f6f7f8; --card:#fff; --line:#dee2e6; --line-soft:#eceef0;
-  --text:#212529; --muted:#6c757d; --ok:#4fae4f; --bad:#dc3545; --warn:#e0a03a; --empty:#e9ecef;
+  --bg:#ffffff; --fg:#16181c; --muted:#70757d; --faint:#9aa0a8;
+  --line:#e4e6ea; --line-2:#f0f1f4;
+  --ok:#1a9d54; --bad:#d1332e; --warn:#a8710a; --empty:#e9ebee;
+  --panel:#fafbfc;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
 }
 @media (prefers-color-scheme: dark){
-  :root{ --bg:#121212; --card:#1b1b1b; --line:#2e2e2e; --line-soft:#252525; --text:#e9ecef; --muted:#9aa0a6; --empty:#2e2e2e; }
+  :root{ --bg:#0d0f12; --fg:#e7e9ec; --muted:#8b9199; --faint:#666c75;
+    --line:#232730; --line-2:#1a1e25; --ok:#35c46b; --bad:#ff6361; --warn:#d29922; --empty:#232730; --panel:#111418; }
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);
-  font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-.wrap{max-width:880px;margin:0 auto;padding:26px 16px 44px}
-.top{display:flex;align-items:baseline;gap:12px;margin-bottom:14px}
-h1{font-size:18px;font-weight:600;margin:0;letter-spacing:-.01em}
-.meta{margin-left:auto;color:var(--muted);font-size:12px}
-.banner{background:var(--ok);color:#fff;border-radius:6px;padding:11px 14px;font-weight:600;font-size:14px;
-  display:flex;align-items:center;gap:10px;margin-bottom:20px}
-.banner.partial{background:var(--warn)}
-.banner.major{background:var(--bad)}
-.banner .n{margin-left:auto;font-weight:500;font-size:12.5px;opacity:.95}
-.group{margin:0 0 16px}
-.g-head{display:flex;align-items:baseline;gap:8px;margin:0 0 6px;padding:0 2px}
-.g-head h2{font-size:13.5px;font-weight:600;margin:0}
-.g-count{margin-left:auto;font-size:12px;color:var(--muted)}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:13.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.wrap{max-width:820px;margin:0 auto;padding:30px 20px 44px}
+.top{display:flex;align-items:baseline;gap:10px;margin-bottom:18px}
+h1{font-size:14px;font-weight:600;margin:0;letter-spacing:-.005em}
+.meta{margin-left:auto;font-size:11px;color:var(--faint);font-family:var(--mono)}
+.banner{display:flex;align-items:center;gap:9px;font-size:12.5px;font-weight:550;
+  padding:9px 12px;margin-bottom:22px;border:1px solid var(--line);border-left-width:3px;border-radius:3px}
+.banner.ok{border-left-color:var(--ok);color:var(--ok);background:color-mix(in srgb,var(--ok) 6%,transparent)}
+.banner.partial{border-left-color:var(--warn);color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,transparent)}
+.banner.major{border-left-color:var(--bad);color:var(--bad);background:color-mix(in srgb,var(--bad) 7%,transparent)}
+.banner .n{margin-left:auto;font-weight:500;font-family:var(--mono);font-size:11px;opacity:.9}
+.group{margin:0 0 20px}
+.g-head{display:flex;align-items:baseline;gap:8px;margin:0 0 7px}
+.g-head h2{font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0}
+.g-count{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
 .g-count.bad{color:var(--bad)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:6px;overflow:hidden}
-.mon{border-top:1px solid var(--line-soft)}
-.mon:first-child{border-top:0}
-.mon>summary{list-style:none;cursor:pointer;user-select:none}
-.mon>summary::-webkit-details-marker{display:none}
-.mon>summary::marker{content:""}
-.mon>summary:hover{background:color-mix(in srgb,var(--text) 3%,transparent)}
-.mon[open]>summary{background:color-mix(in srgb,var(--text) 4%,transparent)}
-.caret{width:0;height:0;border-left:4px solid var(--muted);border-top:3.5px solid transparent;
-  border-bottom:3.5px solid transparent;flex:0 0 auto;transition:transform .12s ease;margin-right:-3px}
-.mon[open] .caret{transform:rotate(90deg)}
-.monitor{display:grid;grid-template-columns:minmax(150px,1.15fr) minmax(0,2.4fr) 74px;gap:14px;align-items:center;
-  padding:9px 13px}
-.m-left{display:flex;align-items:center;gap:8px;min-width:0}
-.pill{width:6px;height:6px;border-radius:50%;background:var(--muted);flex:0 0 auto}
-.pill.up{background:var(--ok)}
-.pill.down{background:var(--bad)}
-.m-text{min-width:0}
-.m-name{font-size:13.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.m-sub{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.m-beats{display:flex;gap:2px;height:30px;align-items:stretch;min-width:0}
-.beat{flex:1 1 0;min-width:2px;border-radius:2px;background:var(--empty)}
-.beat.up{background:var(--ok)}
+.list{border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.row{border-top:1px solid var(--line-2)}
+.row:first-child{border-top:0}
+.row>summary{display:grid;grid-template-columns:8px minmax(120px,1fr) minmax(0,2.2fr) 52px 58px 14px;
+  gap:12px;align-items:center;padding:8px 12px;cursor:pointer;list-style:none;user-select:none}
+.row>summary::-webkit-details-marker{display:none}
+.row>summary::marker{content:""}
+.row>summary:hover{background:var(--panel)}
+.row[open]{background:var(--panel)}
+.state{width:6px;height:6px;border-radius:50%;background:var(--faint)}
+.state.up{background:var(--ok)}
+.state.down{background:var(--bad)}
+.name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.beats{display:flex;gap:2px;height:24px;align-items:stretch;min-width:0}
+.beat{flex:1 1 0;min-width:1px;border-radius:1px;background:var(--empty)}
+.beat.up{background:var(--ok);opacity:.75}
 .beat.down{background:var(--bad)}
-.beat.empty{opacity:.85}
-.m-right{text-align:right;font-variant-numeric:tabular-nums;line-height:1.3}
-.m-uptime{font-size:12.5px;font-weight:500}
-.m-ping{font-size:11.5px;color:var(--muted)}
-.panel{padding:2px 13px 12px 32px;font-size:12.5px;display:grid;gap:5px;border-top:1px dashed var(--line-soft)}
-.prow{display:grid;grid-template-columns:88px 1fr;gap:10px}
-.prow .k{color:var(--muted)}
-.prow .v{min-width:0;overflow-wrap:anywhere}
-.panel a{color:inherit;text-decoration:none;border-bottom:1px solid var(--line)}
-.panel a:hover{color:var(--ok);border-color:var(--ok)}
-.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-footer{margin-top:22px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);
-  font-size:12px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
-footer a{color:inherit;text-decoration:none;border-bottom:1px solid var(--line)}
-footer a:hover{color:var(--text)}
-@media (max-width:620px){
-  .monitor{grid-template-columns:1fr 66px;grid-template-areas:"left right" "beats beats";gap:6px 10px;padding:10px 12px}
-  .m-left{grid-area:left}.m-right{grid-area:right}.m-beats{grid-area:beats;height:24px}
-  .prow{grid-template-columns:76px 1fr}
-  .panel{padding-left:14px}
+.beat.empty{opacity:.5}
+.num{font-family:var(--mono);font-size:11px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.num.ms{color:var(--faint)}
+.chev{color:var(--faint);transition:transform .14s ease;justify-self:end}
+.row[open] .chev{transform:rotate(90deg)}
+.detail{display:grid;gap:3px;padding:2px 12px 11px 32px;font-size:12px}
+.drow{display:grid;grid-template-columns:56px 1fr;gap:10px}
+.drow .k{font-family:var(--mono);font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);padding-top:2px}
+.drow .v{color:var(--muted);min-width:0;overflow-wrap:anywhere}
+.drow a{color:var(--fg);text-decoration:none;border-bottom:1px solid var(--line)}
+.drow a:hover{border-color:var(--fg)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;font-style:normal}
+footer{margin-top:26px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  font-size:11px;color:var(--faint);font-family:var(--mono)}
+footer a{color:var(--faint);text-decoration:none;border-bottom:1px solid var(--line)}
+footer a:hover{color:var(--fg)}
+@media (max-width:640px){
+  .row>summary{grid-template-columns:8px 1fr 44px 14px;grid-template-areas:"state name up chev" ". beats beats beats";gap:5px 10px;padding:9px 11px}
+  .state{grid-area:state}.name{grid-area:name}.num.up{grid-area:up}.chev{grid-area:chev}
+  .beats{grid-area:beats;height:20px}.num.ms{display:none}
+  .detail{padding-left:14px}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -468,19 +467,19 @@ footer a:hover{color:var(--text)}
 <div class="wrap">
   <div class="top">
     <h1>ssoggy status</h1>
-    <div class="meta"><span id="updated">${updated ? "Last updated " + fmtAgo(updated) : "checking…"}</span></div>
+    <span class="meta"><span id="updated">${updated ? "Updated " + fmtAgo(updated) : "checking…"}</span></span>
   </div>
 
   <div class="banner ${b.cls}" id="banner">
     <span id="banner-text">${b.text}</span>
-    <span class="n" id="banner-count">${total - down}/${total} up</span>
+    <span class="n" id="banner-count">${total - down}/${total}</span>
   </div>
 
   <main id="main">${GROUPS.map((g) => groupBlock(g, rows)).join("")}</main>
 
   <footer>
-    <span>90 beats · 1 minute each · click a row for details</span>
-    <span><a href="/api/status">JSON</a></span>
+    <span>90 samples · 60s interval · click a row</span>
+    <span><a href="/api/status">json</a></span>
   </footer>
 </div>
 <script>
@@ -489,14 +488,14 @@ const T = (t) => t ? new Date(t).toISOString().slice(11, 19) + " UTC" : "–";
 function ago(t){ if(!t) return "never"; const s = Math.max(0, Math.round((Date.now()-t)/1000));
   return s < 60 ? s + "s ago" : s < 3600 ? Math.round(s/60) + "m ago" : Math.round(s/3600) + "h ago"; }
 function why(t){
-  const L = t.lastChecked, st = t.status, note = t.note || "";
-  if (!L) return "No check data yet — the next run will fill this in.";
+  const st = t.status, note = t.note || "";
+  if (!t.lastChecked) return "No check data yet — the next run fills this in.";
   if (st === "up") {
     if (t.type === "mc") {
       const p = t.players ? t.players.online + "/" + t.players.max + " players" : "no player data";
       return "Accepting connections. " + p + (t.version ? ", " + t.version : "") + ".";
     }
-    if (t.code && t.code >= 400) return "Responding (HTTP " + t.code + ") — it's up, but the app wants auth or a different path.";
+    if (t.code && t.code >= 400) return "Responding (HTTP " + t.code + ") — up, but the app wants auth or a different path.";
     return "Responding normally" + (t.code ? " (HTTP " + t.code + ")" : "") + " in " + MS(t.ms) + ".";
   }
   if (t.type === "mc") {
@@ -505,7 +504,7 @@ function why(t){
     if (/dns/i.test(note)) return "DNS lookup failed — the hostname doesn't resolve.";
     return "Minecraft check failed: " + (note || "unknown error") + ".";
   }
-  if (/^HTTP 5\\d\\d/.test(note)) return note + " — Cloudflare reached the origin, but the app behind it is failing (crash, bad upstream, or TLS on the origin).";
+  if (/^HTTP 5\\d\\d/.test(note)) return note + " — Cloudflare reached the origin, but the app behind it is failing (crash, bad upstream, or TLS at the origin).";
   if (/^HTTP 4\\d\\d/.test(note)) return note + " — the server answered, but not with the page (wrong host, removed route, or auth wall).";
   if (/timeout/i.test(note)) return "No response within 7s — the server is unreachable or hanging.";
   if (/dns/i.test(note)) return "DNS lookup failed — the hostname doesn't resolve.";
@@ -516,12 +515,12 @@ function why(t){
 function beats(history){
   const b = (history || []).slice(-90), pad = Math.max(0, 90 - b.length);
   let html = "";
-  for (let i = 0; i < pad; i++) html += '<span class="beat empty"></span>';
+  for (let i = 0; i < pad; i++) html += '<i class="beat empty"></i>';
   for (const x of b){
     const ok = typeof x === "number" ? x === 1 : !!x.ok;
     const ms = x && x.ms != null ? " · " + MS(x.ms) : "";
-    const t = x && x.t ? T(x.t) : "–";
-    html += '<span class="beat ' + (ok ? "up" : "down") + '" title="' + (ok ? "Up" : "Down") + " · " + t + ms + '"></span>';
+    const tt = x && x.t ? T(x.t) : "–";
+    html += '<i class="beat ' + (ok ? "up" : "down") + '" title="' + (ok ? "Up" : "Down") + " · " + tt + ms + '"></i>';
   }
   return html;
 }
@@ -532,44 +531,37 @@ async function refresh(){
     const data = await res.json();
     const byId = Object.fromEntries(data.targets.map(t => [t.id, t]));
     let down = 0;
-    document.querySelectorAll(".mon").forEach((det) => {
-      const t = byId[det.dataset.id];
+    document.querySelectorAll(".row").forEach((row) => {
+      const t = byId[row.dataset.id];
       if (!t) return;
       if (t.status === "down") down++;
-      det.querySelector(".pill").className = "pill " + t.status;
-      const sr = det.querySelector(".m-name .sr");
+      row.querySelector(".state").className = "state " + t.status;
+      const sr = row.querySelector(".name .sr");
       if (sr) sr.textContent = " — " + t.status;
-      const bits = [];
-      if (t.ms != null) bits.push(MS(t.ms));
-      if (t.players) bits.push(t.players.online + "/" + t.players.max + " players");
-      if (t.version) bits.push(t.version);
-      if (t.code) bits.push("HTTP " + t.code);
-      if (t.note && t.status !== "up") bits.push(t.note);
-      if (bits.length) det.querySelector(".m-sub").textContent = bits.join(" · ");
-      det.querySelector(".m-beats").innerHTML = beats(t.history);
-      det.querySelector(".m-uptime").textContent = t.uptime != null ? (t.uptime*100).toFixed(t.uptime >= 0.995 ? 1 : 2) + "%" : "–";
-      det.querySelector(".m-ping").textContent = t.avgMs != null ? MS(t.avgMs) : "–";
-      const ps = det.querySelector('[data-f="p-status"]');
+      row.querySelector(".beats").innerHTML = beats(t.history);
+      row.querySelector(".num.up").textContent = t.uptime != null ? (t.uptime*100).toFixed(t.uptime >= 0.995 ? 1 : 2) + "%" : "–";
+      row.querySelector(".num.ms").textContent = t.avgMs != null ? MS(t.avgMs) : "–";
+      const ps = row.querySelector('[data-f="p-status"]');
       if (ps) ps.textContent = t.status + (t.code ? " · HTTP " + t.code : "");
-      const pw = det.querySelector('[data-f="p-why"]');
+      const pw = row.querySelector('[data-f="p-why"]');
       if (pw) pw.textContent = why(t);
-      const pl = det.querySelector('[data-f="p-last"]');
+      const pl = row.querySelector('[data-f="p-last"]');
       if (pl) pl.textContent = t.lastChecked ? ago(t.lastChecked) + " · " + T(t.lastChecked) : "never";
     });
     document.querySelectorAll(".group").forEach((sec) => {
-      const rows = sec.querySelectorAll(".mon");
-      const bad = Array.from(rows).filter(r => r.querySelector(".pill").classList.contains("down")).length;
+      const rows = sec.querySelectorAll(".row");
+      const bad = Array.from(rows).filter(r => r.querySelector(".state").classList.contains("down")).length;
       const cnt = sec.querySelector(".g-count");
-      if (cnt){ cnt.textContent = (rows.length - bad) + "/" + rows.length + " up"; cnt.className = "g-count" + (bad ? " bad" : ""); }
+      if (cnt){ cnt.textContent = (rows.length - bad) + "/" + rows.length; cnt.className = "g-count" + (bad ? " bad" : ""); }
     });
     const total = data.targets.length;
     const cls = down === 0 ? "ok" : down / total >= 0.5 ? "major" : "partial";
     const banner = document.getElementById("banner");
     banner.className = "banner " + cls;
     document.getElementById("banner-text").textContent =
-      cls === "ok" ? "All Systems Operational" : cls === "major" ? "Major Outage" : "Partially Degraded Service";
-    document.getElementById("banner-count").textContent = (total - down) + "/" + total + " up";
-    document.getElementById("updated").textContent = "Last updated " + ago(data.updated);
+      cls === "ok" ? "All systems operational" : cls === "major" ? "Major outage" : "Partially degraded";
+    document.getElementById("banner-count").textContent = (total - down) + "/" + total;
+    document.getElementById("updated").textContent = "Updated " + ago(data.updated);
   }catch(e){}
 }
 setInterval(refresh, 30000);
@@ -587,8 +579,9 @@ function jsonPayload(state, live) {
       return {
         id: t.id, name: t.name, group: t.group, type: t.type,
         url: t.url || `${t.host}:${t.port}`,
+        about: t.about ?? null, note: t.note ?? null,
         status: last ? (last.ok ? "up" : "down") : "unknown",
-        ms: last?.ms ?? null, code: last?.code ?? null, note: last?.note ?? null,
+        ms: last?.ms ?? null, code: last?.code ?? null, error: last?.note ?? null,
         players: last?.players ?? null, version: last?.version ?? null,
         lastChecked: last?.t ?? null,
         uptime: uptimeOf(entry), avgMs: avgMs(entry),
@@ -612,8 +605,7 @@ export default {
     if (path === "/api/status" || path === "/api/check") {
       const state = await readState(env);
       const stale = path === "/api/check" || !state.updated || Date.now() - state.updated > 90_000;
-      let live = null;
-      let fresh = state;
+      let live = null, fresh = state;
       if (stale) {
         const run = await runAll(env);
         live = run.byId;
