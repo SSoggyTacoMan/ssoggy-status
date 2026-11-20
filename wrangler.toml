@@ -1,0 +1,21 @@
+name = "ssoggy-status"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+workers_dev = false
+
+# account_id is intentionally not committed — set CLOUDFLARE_ACCOUNT_ID in the
+# environment (or in the GitHub Actions secret of the same name) instead.
+
+[[kv_namespaces]]
+binding = "STATUS"
+id = "f32747945af24fa99ad018929de54c63"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[routes]]
+pattern = "status.ssoggy.com/*"
+zone_id = "312f23e1c031f50ce92955f68dd7d61c"
+
+[observability]
+enabled = true
